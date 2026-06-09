@@ -32,6 +32,7 @@
 #include "pid.h"
 #include "distanceSensor.h"
 #include "lcd_hd44780_i2c.h"
+#include "buttons.h"
 #include "string.h"
 #include "stdio.h"
 /* USER CODE END Includes */
@@ -64,6 +65,11 @@ typedef struct {
     uint8_t ucButtonId;       // 0=UP,1=RIGHT,2=LEFT,3=DOWN,4=ENTER
     uint8_t ucEventType;      // 0=PRESS, 1=RELEASE
 } ButtonEvent_t;
+
+// Mensagem pré-formatada para o LCD (2 linhas x 16 colunas = 32 bytes)
+typedef struct {
+    uint8_t ucData[32];
+} LcdMsg_t;
 
 // Estrutura para dados de telemetria (GV5)
 typedef struct {
@@ -155,8 +161,20 @@ static volatile uint32_t g_ultrasonicEchoTicks = 0;    // GV4: tempo do eco em t
 extern I2C_HandleTypeDef hi2c2;
 
 // Handles dos timers e UART (gerados pelo CubeMX)
-extern TIM_HandleTypeDef htim1, htim8, htim16, htim17, htim20, htim3;
+extern TIM_HandleTypeDef htim1, htim8, htim16, htim17, htim20, htim3, htim7;
 extern UART_HandleTypeDef hlpuart1;
+
+// Modo atual do sistema (escrito por vTaskTrocarModo, lido por vTaskSegueLinha).
+// 1 byte -> escrita/leitura atômica no Cortex-M4; dispensa mutex.
+static volatile uint8_t gvSystemMode = MODE_MANUAL;
+
+// Buffer circular de recepção da UART: a ISR (I2) escreve o byte e libera
+// semBTRxReady; vTaskUART (T7) drena o buffer e faz o parsing dos comandos.
+#define BT_RX_RING_SIZE 128U
+static uint8_t  gucBtRxRing[BT_RX_RING_SIZE];
+static volatile uint16_t gusBtRxHead = 0;
+static volatile uint16_t gusBtRxTail = 0;
+static uint8_t  gucBtRxByte = 0;   // destino do HAL_UART_Receive_IT
 
 // Definição dos pinos dos motores (conforme gpio.c)
 #define MOTOR_DIR_IN1_Pin   Motor_Dir_IN1_Pin
@@ -353,9 +371,21 @@ void MX_FREERTOS_Init(void) {
                             MOTOR_DIR_IN2_GPIO_Port, MOTOR_DIR_IN2_Pin,
                             MOTOR_ESQ_IN3_GPIO_Port, MOTOR_ESQ_IN3_Pin,
                             MOTOR_ESQ_IN4_GPIO_Port, MOTOR_ESQ_IN4_Pin,
-                            &htim8, TIM_CHANNEL_1,   // motor direito
-                            &htim1, TIM_CHANNEL_1);  // motor esquerdo
+                            &htim1, TIM_CHANNEL_2,   // motor direito  -> Motor_Dir_PWM (PC1 = TIM1_CH2)
+                            &htim1, TIM_CHANNEL_1);  // motor esquerdo -> Motor_Esq_PWM (PC0 = TIM1_CH1)
     vMotorEncoderInitEncoders(&htim16, TIM_CHANNEL_1, &htim17, TIM_CHANNEL_1);
+
+    // Buzzer no TIM8_CH1 (PA15): inicia o PWM com duty 0 (silencioso)
+    HAL_TIM_PWM_Start(&htim8, TIM_CHANNEL_1);
+    __HAL_TIM_SET_COMPARE(&htim8, TIM_CHANNEL_1, 0);
+
+    // Botões (debounce por software usando o TIM7). Ordem: Up, Right, Left, Down, Enter
+    ucButtonsInit(BT_Cima_GPIO_Port,  BT_Cima_Pin,
+                  BT_Dir_GPIO_Port,   BT_Dir_Pin,
+                  BT_Esq_GPIO_Port,   BT_Esq_Pin,
+                  BT_Baixo_GPIO_Port, BT_Baixo_Pin,
+                  BT_Enter_GPIO_Port, BT_Enter_Pin,
+                  &htim7, 5000U);
 
     // Inicializa o LCD
     lcdInit(&hi2c2, 0x27, 2, 16);
@@ -390,7 +420,9 @@ void MX_FREERTOS_Init(void) {
   semBTRxReadyHandle = osSemaphoreNew(128, 0, &semBTRxReady_attributes);
 
   /* USER CODE BEGIN RTOS_SEMAPHORES */
-  /* add semaphores, ... */
+  /* Arma a recepção da UART por interrupção (1 byte por vez) somente após o
+   * semáforo semBTRxReady existir -> ISR I2 (HAL_UART_RxCpltCallback). */
+  HAL_UART_Receive_IT(&hlpuart1, &gucBtRxByte, 1);
   /* USER CODE END RTOS_SEMAPHORES */
 
   /* USER CODE BEGIN RTOS_TIMERS */
@@ -417,7 +449,19 @@ void MX_FREERTOS_Init(void) {
   qLCDDataHandle = osMessageQueueNew (12, sizeof(uint64_t), &qLCDData_attributes);
 
   /* USER CODE BEGIN RTOS_QUEUES */
-  /* add queues, ... */
+  /* As filas geradas pelo CubeMX usam item-size incorreto (uint16_t/uint8_t/uint64_t)
+   * porque os typedefs do projeto não são visíveis na IOC. Aqui recriamos cada fila
+   * com o tamanho real da struct. Esta correção também deve ser feita na IOC
+   * (Tasks and Queues -> Item Size) para manter consistência ao regenerar.
+   * qSensorsData não é mais usada (leitura de sensores migrou para vTaskSegueLinha). */
+  osMessageQueueDelete(qMotorCommandHandle);
+  qMotorCommandHandle = osMessageQueueNew(8, sizeof(MotorCommand_t), &qMotorCommand_attributes);
+
+  osMessageQueueDelete(qButtonsEventHandle);
+  qButtonsEventHandle = osMessageQueueNew(4, sizeof(ButtonEvent_t), &qButtonsEvent_attributes);
+
+  osMessageQueueDelete(qLCDDataHandle);
+  qLCDDataHandle = osMessageQueueNew(12, sizeof(LcdMsg_t), &qLCDData_attributes);
   /* USER CODE END RTOS_QUEUES */
 
   /* Create the thread(s) */
@@ -605,48 +649,11 @@ void vStartTaskMotor(void *argument)
 void vStartTaskSensorRead(void *argument)
 {
   /* USER CODE BEGIN vStartTaskSensorRead */
-
+	    // OBSOLETA no modelo final: a leitura dos sensores + bateria + binarização +
+	    // parada por bateria baixa migrou para vTaskSegueLinha (que roda sempre, em
+	    // ambos os modos). Esta task se auto-remove. Recomendado também removê-la na IOC.
 	    (void)argument;
-	    SensorsData_t xData;
-	    const TickType_t xPeriod = pdMS_TO_TICKS(TASK_PERIOD_SENSORS);
-	    TickType_t xLastWakeTime = xTaskGetTickCount();
-
-	    for(;;)
-	    {
-	        vTaskDelayUntil(&xLastWakeTime, xPeriod);
-
-	        // 1. Lê valores crus dos sensores de linha
-	        for (int i = 0; i < 5; i++)
-	            xData.usIRRaw[i] = fLineSensorGetRawValue((lineSensorsEnum_t)i);
-
-	        // 2. Binariza usando limiares de GV3
-	        if (osMutexAcquire(mutexCalibDataHandle, pdMS_TO_TICKS(5)) == osOK)
-	        {
-	            for (int i = 0; i < 5; i++)
-	                xData.ucIRBin[i] = (xData.usIRRaw[i] > gvCalibData.usIRThreshold[i]) ? 1 : 0;
-	            osMutexRelease(mutexCalibDataHandle);
-	        }
-
-	        // 3. Lê bateria
-	        xData.usBatteryRaw = usBatteryGetRawValue();
-	        xData.ucBatteryPct = usBatteryGetCharge();
-
-	        // 4. Publica na Q1 (overwrite)
-	        osMessageQueuePut(qSensorsDataHandle, &xData, 0, 0);
-
-	        // 5. Atualiza telemetria
-	        if (osMutexAcquire(mutexTelemetryHandle, pdMS_TO_TICKS(5)) == osOK)
-	        {
-	            gvTelemetry.batteryPct = xData.ucBatteryPct;
-	            osMutexRelease(mutexTelemetryHandle);
-	        }
-
-	        // 6. Verifica bateria baixa e seta emergência
-	        uint16_t usBattery_mV = (xData.usBatteryRaw * 3300) / 4095;
-	        if (usBattery_mV < MIN_BATTERY_VOLTAGE_MV)
-	            osEventFlagsSet(evEmergencyHandle, EMERGENCY_BIT);
-	    }
-
+	    vTaskDelete(NULL);
   /* USER CODE END vStartTaskSensorRead */
 }
 
@@ -660,79 +667,103 @@ void vStartTaskSensorRead(void *argument)
 void vStartTaskSegueLinha(void *argument)
 {
   /* USER CODE BEGIN vStartTaskSegueLinha */
-
 	    (void)argument;
-	    SensorsData_t xSensors;
 	    MotorCommand_t xCmd;
-	    float fError, fOutput;
-	    static pid_data_type xPidInstance;
-	    static uint8_t ucFirstRun = 1;
-	    const TickType_t xPeriod = pdMS_TO_TICKS(TASK_PERIOD_LINE_PID);
-	    TickType_t xLastWakeTime = xTaskGetTickCount();
+	    uint8_t  ucIRBin[5];
+	    const int8_t cWeights[5] = {-2, -1, 0, 1, 2};
 
-	    // Inicialização do PID
-	    if (ucFirstRun)
-	    {
-	        PidParams_t localPid;
-	        if (osMutexAcquire(mutexPIDParamsHandle, pdMS_TO_TICKS(100)) == osOK)
-	        {
-	            localPid = gvPIDParams;
-	            osMutexRelease(mutexPIDParamsHandle);
-	        }
-	        else
-	            localPid = (PidParams_t){0.5f, 0.0f, 0.0f};
-	        vPidInit(&xPidInstance, localPid.fKp, localPid.fKi, localPid.fKd, 10.0f, 100.0f);
-	        ucFirstRun = 0;
-	    }
+	    // Parâmetros do controle de seguimento (ajustáveis)
+	    const float fBaseSpeed   = 0.40f;   // duty base (0..1) das rodas
+	    const float fTurnLimit   = 0.40f;   // limite de correção (mantém duty >= 0)
+	    const float fIntegralMax = 50.0f;   // anti-windup do integrador
+
+	    // Estado do PID de linha (saída SIMÉTRICA: vira p/ esquerda e direita)
+	    float fIntegral = 0.0f;
+	    float fLastError = 0.0f;
+
+	    const TickType_t xPeriod = pdMS_TO_TICKS(TASK_PERIOD_SENSORS); // 50 ms
+	    TickType_t xLastWakeTime = xTaskGetTickCount();
 
 	    for(;;)
 	    {
 	        vTaskDelayUntil(&xLastWakeTime, xPeriod);
 
-	        // Recebe dados da Q1 (timeout 0)
-	        if (osMessageQueueGet(qSensorsDataHandle, &xSensors, NULL, 0) != osOK)
-	            continue;
+	        /* ---- 1) Leitura + binarização dos 5 sensores IR (sempre) ---- */
+	        uint16_t usRaw[5];
+	        for (int i = 0; i < 5; i++)
+	            usRaw[i] = (uint16_t)fLineSensorGetRawValue((lineSensorsEnum_t)i);
 
-	        // Calcula erro: posição da linha com pesos -2 a +2
-	        fError = 0.0f;
-	        int8_t weights[5] = {-2, -1, 0, 1, 2};
-	        uint8_t activeCount = 0;
+	        if (osMutexAcquire(mutexCalibDataHandle, pdMS_TO_TICKS(5)) == osOK)
+	        {
+	            for (int i = 0; i < 5; i++)
+	                ucIRBin[i] = (usRaw[i] > gvCalibData.usIRThreshold[i]) ? 1U : 0U;
+	            osMutexRelease(mutexCalibDataHandle);
+	        }
+
+	        /* ---- 2) Bateria + parada de emergência por subtensão (sempre) ---- */
+	        uint16_t usBatteryRaw = usBatteryGetRawValue();
+	        uint8_t  ucBatteryPct = (uint8_t)usBatteryGetCharge();
+	        if (osMutexAcquire(mutexTelemetryHandle, pdMS_TO_TICKS(5)) == osOK)
+	        {
+	            gvTelemetry.batteryPct = ucBatteryPct;
+	            osMutexRelease(mutexTelemetryHandle);
+	        }
+	        uint16_t usBattery_mV = (uint16_t)(((uint32_t)usBatteryRaw * 3300U) / 4095U);
+	        if (usBattery_mV < MIN_BATTERY_VOLTAGE_MV)
+	            osEventFlagsSet(evEmergencyHandle, EMERGENCY_BIT);
+
+	        /* ---- 3) Controle de linha: só no modo AUTÔNOMO ---- */
+	        if (gvSystemMode != MODE_AUTONOMOUS)
+	        {
+	            // Modo MANUAL: zera estado do PID; os motores são comandados via UART.
+	            fIntegral  = 0.0f;
+	            fLastError = 0.0f;
+	            continue;
+	        }
+
+	        // Erro de posição da linha (pesos -2..+2); se perder a linha, mantém o
+	        // sentido da última correção para reencontrá-la.
+	        float fError = 0.0f;
+	        uint8_t ucActive = 0;
 	        for (int i = 0; i < 5; i++)
 	        {
-	            if (xSensors.ucIRBin[i])
-	            {
-	                fError += weights[i];
-	                activeCount++;
-	            }
+	            if (ucIRBin[i]) { fError += (float)cWeights[i]; ucActive++; }
 	        }
-	        if (activeCount) fError /= activeCount;
+	        if (ucActive)
+	            fError /= (float)ucActive;
+	        else
+	            fError = (fLastError >= 0.0f) ? 2.0f : -2.0f;
 
-	        // Atualiza ganhos PID se modificados
+	        // Ganhos PID atuais (ajustáveis por Bluetooth via mutexPIDParams)
+	        float fKp = 0.5f, fKi = 0.0f, fKd = 0.0f;
 	        if (osMutexAcquire(mutexPIDParamsHandle, pdMS_TO_TICKS(5)) == osOK)
 	        {
-	            if (gvPIDParams.fKp != xPidInstance.fKp ||
-	                gvPIDParams.fKi != xPidInstance.fKi ||
-	                gvPIDParams.fKd != xPidInstance.fKd)
-	            {
-	                vPidSetKp(&xPidInstance, gvPIDParams.fKp);
-	                vPidSetKi(&xPidInstance, gvPIDParams.fKi);
-	                vPidSetKd(&xPidInstance, gvPIDParams.fKd);
-	            }
+	            fKp = gvPIDParams.fKp;
+	            fKi = gvPIDParams.fKi;
+	            fKd = gvPIDParams.fKd;
 	            osMutexRelease(mutexPIDParamsHandle);
 	        }
 
-	        fOutput = fPidUpdateData(&xPidInstance, 0.0f, fError);
-	        float fBaseSpeed = 0.5f;
-	        float fTurn = fOutput / 100.0f;
-	        if (fTurn > 0.3f) fTurn = 0.3f;
-	        if (fTurn < -0.3f) fTurn = -0.3f;
+	        // PID com saída simétrica (sem o clamp [0,sat] do pid.c, que é p/ velocidade)
+	        fIntegral += fError;
+	        if (fIntegral >  fIntegralMax) fIntegral =  fIntegralMax;
+	        if (fIntegral < -fIntegralMax) fIntegral = -fIntegralMax;
+	        float fDeriv  = fError - fLastError;
+	        float fTurn   = fKp * fError + fKi * fIntegral + fKd * fDeriv;
+	        fLastError = fError;
 
-	        xCmd.fSpeedLeft = fBaseSpeed + fTurn;
+	        if (fTurn >  fTurnLimit) fTurn =  fTurnLimit;
+	        if (fTurn < -fTurnLimit) fTurn = -fTurnLimit;
+
+	        xCmd.fSpeedLeft  = fBaseSpeed + fTurn;
 	        xCmd.fSpeedRight = fBaseSpeed - fTurn;
+	        if (xCmd.fSpeedLeft  < 0.0f) xCmd.fSpeedLeft  = 0.0f;
+	        if (xCmd.fSpeedLeft  > 1.0f) xCmd.fSpeedLeft  = 1.0f;
+	        if (xCmd.fSpeedRight < 0.0f) xCmd.fSpeedRight = 0.0f;
+	        if (xCmd.fSpeedRight > 1.0f) xCmd.fSpeedRight = 1.0f;
 	        xCmd.ucCmdType = 1; // AUTO
 	        osMessageQueuePut(qMotorCommandHandle, &xCmd, 0, 0);
 	    }
-
   /* USER CODE END vStartTaskSegueLinha */
 }
 
@@ -834,21 +865,14 @@ void vStartTaskUART(void *argument)
 
 	    for(;;)
 	    {
-	        // Aguarda byte recebido (semáforo dado pela ISR da UART)
+	        // Aguarda o sinal da ISR (I2) indicando byte(s) recebido(s)
 	        if (osSemaphoreAcquire(semBTRxReadyHandle, pdMS_TO_TICKS(100)) == osOK)
 	        {
-	            // Lê o byte do buffer da UART (substitua pela sua implementação)
-	            // Exemplo: ucRxByte = uart_rx_buffer[uart_rx_index++];
-	            // Por simplicidade, usamos um placeholder. Você deve integrar com a HAL.
-	            // Supondo que o byte já esteja disponível em alguma variável global.
-	            // Aqui vamos simular a leitura de um buffer circular gerenciado pela ISR.
-	            // Se você não tiver, pode usar HAL_UART_Receive_IT e um buffer.
-	            // Exemplo fictício:
-	            // extern uint8_t uart_rx_byte;
-	            // ucRxByte = uart_rx_byte;
-
-	            // Para efeito de compilação, apenas um placeholder:
-	            ucRxByte = 0; // <-- substitua pela leitura real
+	          // Drena todos os bytes disponíveis no buffer circular preenchido pela ISR
+	          while (gusBtRxTail != gusBtRxHead)
+	          {
+	            ucRxByte = gucBtRxRing[gusBtRxTail];
+	            gusBtRxTail = (uint16_t)((gusBtRxTail + 1U) % BT_RX_RING_SIZE);
 
 	            if (ucRxByte == '\n' || ucRxByte == '\r')
 	            {
@@ -909,6 +933,7 @@ void vStartTaskUART(void *argument)
 	            {
 	                rxBuffer[rxIndex++] = ucRxByte;
 	            }
+	          } // while: drena buffer circular
 	        }
 
 	        // Envia telemetria a cada 1 segundo
@@ -980,40 +1005,12 @@ void vStartTaskLCD(void *argument)
 void vStartTaskButtons(void *argument)
 {
   /* USER CODE BEGIN vStartTaskButtons */
-  /* Infinite loop */
-
+	    // OBSOLETA no modelo final: o tratamento dos botões passou para a ISR (I5).
+	    // A EXTI chama vButtonsDebouncingStart; o TIM7 conclui o debounce e os callbacks
+	    // vButtonsPressedCallback/Released postam em qButtonsEvent. Esta task se auto-remove.
+	    // Recomendado também removê-la na IOC (junto com o event group evButtonsState).
 	    (void)argument;
-	    uint32_t ulBits;
-	    ButtonEvent_t btnEvent;
-	    const TickType_t xPeriod = pdMS_TO_TICKS(TASK_PERIOD_BUTTONS);
-	    TickType_t xLastWakeTime = xTaskGetTickCount();
-	    static uint32_t lastButtonBits = 0;
-	    static uint32_t debounceBits = 0;
-
-	    for(;;)
-	    {
-	        vTaskDelayUntil(&xLastWakeTime, xPeriod);
-	        ulBits = osEventFlagsWait(evButtonsStateHandle, 0x1F, osFlagsWaitAny, xPeriod);
-	        if (ulBits == 0) continue;
-
-	        // Debounce simples: verifica se o mesmo padrão se repete por 2 ciclos (100ms)
-	        debounceBits = (debounceBits << 5) | (ulBits & 0x1F);
-	        if ((debounceBits & 0x1F) == ((debounceBits >> 5) & 0x1F))
-	        {
-	            uint32_t changed = ulBits ^ lastButtonBits;
-	            for (int i = 0; i < 5; i++)
-	            {
-	                if (changed & (1 << i))
-	                {
-	                    btnEvent.ucButtonId = i;
-	                    btnEvent.ucEventType = (ulBits & (1 << i)) ? 0 : 1; // 0=PRESS, 1=RELEASE
-	                    osMessageQueuePut(qButtonsEventHandle, &btnEvent, 0, 0);
-	                }
-	            }
-	            lastButtonBits = ulBits;
-	        }
-	    }
-
+	    vTaskDelete(NULL);
   /* USER CODE END vStartTaskButtons */
 }
 
@@ -1029,32 +1026,42 @@ void vStartTaskTrocarModo(void *argument)
   /* USER CODE BEGIN vStartTaskTrocarModo */
 	    (void)argument;
 	    uint8_t ucMode;
-	    static uint8_t currentMode = MODE_MANUAL;
+	    ButtonEvent_t xBtn;
+	    uint8_t ucCurrentMode = MODE_MANUAL;
+	    uint8_t ucNewMode = MODE_MANUAL;
+
+	    // Aplica o modo inicial (vTaskSegueLinha lê gvSystemMode a cada ciclo)
+	    gvSystemMode = ucCurrentMode;
 
 	    for(;;)
 	    {
-	        if (osMessageQueueGet(qTrocaModoHandle, &ucMode, NULL, portMAX_DELAY) == osOK)
+	        ucNewMode = ucCurrentMode;
+
+	        // 1) Comando de modo vindo do Bluetooth (T7) - bloqueia até 50 ms
+	        if (osMessageQueueGet(qTrocaModoHandle, &ucMode, NULL, pdMS_TO_TICKS(50)) == osOK)
+	            ucNewMode = ucMode;
+
+	        // 2) Eventos dos botões físicos (produzidos pela ISR I5): ENTER alterna o modo
+	        while (osMessageQueueGet(qButtonsEventHandle, &xBtn, NULL, 0) == osOK)
 	        {
-	            if (ucMode == MODE_AUTONOMOUS && currentMode != MODE_AUTONOMOUS)
-	            {
-	                vTaskResume(vTaskSegueLinhaHandle);
-	                currentMode = MODE_AUTONOMOUS;
-	            }
-	            else if (ucMode == MODE_MANUAL && currentMode != MODE_MANUAL)
-	            {
-	                vTaskSuspend(vTaskSegueLinhaHandle);
-	                currentMode = MODE_MANUAL;
-	            }
+	            if (xBtn.ucButtonId == BUTTONS_BUTTON_ENTER && xBtn.ucEventType == 0)
+	                ucNewMode = (ucCurrentMode == MODE_AUTONOMOUS) ? MODE_MANUAL : MODE_AUTONOMOUS;
+	        }
+
+	        if (ucNewMode != ucCurrentMode)
+	        {
+	            ucCurrentMode = ucNewMode;
+	            gvSystemMode = ucCurrentMode;   // <- vTaskSegueLinha passa a (não) rodar o PID
+
 	            if (osMutexAcquire(mutexTelemetryHandle, pdMS_TO_TICKS(5)) == osOK)
 	            {
-	                gvTelemetry.systemMode = currentMode;
+	                gvTelemetry.systemMode = ucCurrentMode;
 	                osMutexRelease(mutexTelemetryHandle);
 	            }
-	            uint8_t status = (currentMode == MODE_AUTONOMOUS) ? 0x02 : 0x03;
-	            osMessageQueuePut(qSystemStatusHandle, &status, 0, 0);
+	            uint8_t ucStatus = (ucCurrentMode == MODE_AUTONOMOUS) ? 0x02 : 0x03;
+	            osMessageQueuePut(qSystemStatusHandle, &ucStatus, 0, 0);
 	        }
 	    }
-
   /* USER CODE END vStartTaskTrocarModo */
 }
 
@@ -1118,6 +1125,79 @@ void vStartTaskUltrassonicBuzzer(void *argument)
 
 /* Private application code --------------------------------------------------*/
 /* USER CODE BEGIN Application */
+
+/* ========================================================================== */
+/*  Callbacks de interrupção (cola ISR -> RTOS)                               */
+/* ========================================================================== */
+
+/**
+ * @brief Captura dos timers: encoders (I3/I4) e eco do ultrassônico (I6).
+ * @note  Chamada pela HAL dentro do IRQ do timer correspondente.
+ */
+void HAL_TIM_IC_CaptureCallback(TIM_HandleTypeDef *htim)
+{
+    if (htim->Instance == TIM16)        // I3: encoder roda esquerda (Encoder_Esq_TIM / PB4)
+    {
+        gvEncoderCounts[0]++;           // escrita de 32 bits é atômica no Cortex-M4
+    }
+    else if (htim->Instance == TIM17)   // I4: encoder roda direita (Encoder_Dir_TIM / PB5)
+    {
+        gvEncoderCounts[1]++;
+    }
+    else if (htim->Instance == TIM3)    // I6: eco do HC-SR04 (echo capture)
+    {
+        // O driver distanceSensor.c captura via DMA. Quando migrar para a leitura
+        // por semáforo (modelo I6), grave aqui g_ultrasonicEchoTicks e libere:
+        //   osSemaphoreRelease(semUltrassonicHandle);
+    }
+}
+
+/**
+ * @brief EXTI: bumper frontal (I1) e botões físicos (I5).
+ */
+void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
+{
+    /* I1 - bumper frontal: parada de emergência (<10 ms).
+     * Requer configurar PD2 (Switch_Fr) como EXTI na IOC. Quando existir:
+     *   if (GPIO_Pin == Switch_Fr_Pin) {
+     *       osEventFlagsSet(evEmergencyHandle, EMERGENCY_BIT);
+     *       return;
+     *   }
+     */
+
+    /* I5 - botões: inicia o debounce (buttons.c cuida da validação no TIM7) */
+    vButtonsDebouncingStart(GPIO_Pin);
+}
+
+/**
+ * @brief Recepção UART por interrupção (I2): enfileira o byte e avisa a T7.
+ */
+void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
+{
+    if (huart->Instance == LPUART1)
+    {
+        gucBtRxRing[gusBtRxHead] = gucBtRxByte;
+        gusBtRxHead = (uint16_t)((gusBtRxHead + 1U) % BT_RX_RING_SIZE);
+        osSemaphoreRelease(semBTRxReadyHandle);   // conta 1 byte disponível
+        HAL_UART_Receive_IT(huart, &gucBtRxByte, 1); // re-arma a próxima recepção
+    }
+}
+
+/* ========================================================================== */
+/*  Callbacks de botão (I5): chamados por vButtonsDebouncingStop (ISR TIM7)    */
+/*  postam o evento validado em qButtonsEvent (consumido por vTaskTrocarModo). */
+/* ========================================================================== */
+void vButtonsPressedCallback(buttonsEnum_t xButton)
+{
+    ButtonEvent_t xEvent = { (uint8_t)xButton, 0U }; // 0 = PRESS
+    osMessageQueuePut(qButtonsEventHandle, &xEvent, 0, 0);
+}
+
+void vButtonsReleasedCallback(buttonsEnum_t xButton)
+{
+    ButtonEvent_t xEvent = { (uint8_t)xButton, 1U }; // 1 = RELEASE
+    osMessageQueuePut(qButtonsEventHandle, &xEvent, 0, 0);
+}
 
 /* USER CODE END Application */
 

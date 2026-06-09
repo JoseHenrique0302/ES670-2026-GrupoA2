@@ -13,6 +13,7 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
+#include "buttons.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -167,6 +168,10 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
     HAL_IncTick();
   }
   /* USER CODE BEGIN Callback 1 */
+  // TIM7: fim da janela de debounce dos botões -> valida a transição (I5)
+  if (htim->Instance == TIM7) {
+    vButtonsDebouncingStop();
+  }
   /* USER CODE END Callback 1 */
 }
 
