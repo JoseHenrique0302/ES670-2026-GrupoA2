@@ -22,6 +22,7 @@
 #include "task.h"
 #include "main.h"
 #include "cmsis_os.h"
+#include <math.h>
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
@@ -761,12 +762,13 @@ void vStartTaskOdometria(void *argument)
 
 	        if (osMutexAcquire(mutexTelemetryHandle, pdMS_TO_TICKS(5)) == osOK)
 	        {
-	            gvTelemetry.posX += fDeltaDist * cosf(gvTelemetry.theta);
-	            gvTelemetry.posY += fDeltaDist * sinf(gvTelemetry.theta);
+	        	const float PI = 3.1415926535897932f;
+	            gvTelemetry.posX += fDeltaDist * (float)cosf((double)gvTelemetry.theta);
+	            gvTelemetry.posY += fDeltaDist * (float)sinf((double)gvTelemetry.theta);
 	            gvTelemetry.theta += fDeltaTheta;
 	            // Normaliza theta
-	            if (gvTelemetry.theta > 3.14159f) gvTelemetry.theta -= 2.0f * 3.14159f;
-	            if (gvTelemetry.theta < -3.14159f) gvTelemetry.theta += 2.0f * 3.14159f;
+	            if (gvTelemetry.theta > PI) gvTelemetry.theta -= 2.0f * PI;
+	            if (gvTelemetry.theta < PI) gvTelemetry.theta += 2.0f * PI;
 
 	            float fSpeed = fDeltaDist / (TASK_PERIOD_ODOMETRY / 1000.0f);
 	            gvTelemetry.speedCurrent = fSpeed;
