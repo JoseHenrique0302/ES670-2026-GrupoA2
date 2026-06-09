@@ -1075,48 +1075,48 @@ void vStartTaskTrocarModo(void *argument)
 void vStartTaskUltrassonicBuzzer(void *argument)
 {
   /* USER CODE BEGIN vStartTaskUltrassonicBuzzer */
+	    // Abordagem escolhida: usa o driver distanceSensor.c (captura por DMA).
+	    // O trigger é gerado continuamente pelo PWM do TIM20 (configurado no init);
+	    // aqui apenas lemos a distância já calculada e acionamos o buzzer.
 	    (void)argument;
 	    const TickType_t xPeriod = pdMS_TO_TICKS(TASK_PERIOD_ULTRASONIC);
 	    TickType_t xLastWakeTime = xTaskGetTickCount();
-	    MotorCommand_t stopCmd = {0,0,0};
+	    MotorCommand_t xStopCmd = {0.0f, 0.0f, 0};   // ucCmdType 0 = STOP
 	    float fDistance;
+
+	    // Buzzer no TIM8_CH1: clock do timer = 170MHz/170 = 1 MHz (prescaler 170-1).
+	    // Frequência do tom = 1e6 / (ARR+1). Duty 50% => compare = (ARR+1)/2.
+	    const uint32_t ulBuzzerClkHz = 1000000UL;
 
 	    for(;;)
 	    {
 	        vTaskDelayUntil(&xLastWakeTime, xPeriod);
 
-	        // Dispara o trigger do HC-SR04 (pulso de 10us no pino TRIG)
-	        // Exemplo (substitua pelos pinos corretos):
-	        // HAL_GPIO_WritePin(TRIG_GPIO_Port, TRIG_Pin, GPIO_PIN_SET);
-	        // delay_us(10);
-	        // HAL_GPIO_WritePin(TRIG_GPIO_Port, TRIG_Pin, GPIO_PIN_RESET);
-	        // Se usar timer para gerar o pulso, configure-o aqui.
+	        fDistance = fDistanceSensorGetDistance();   // cm (driver DMA)
 
-	        // Aguarda o semáforo indicando que o eco foi capturado (timeout de 100ms)
-	        if (osSemaphoreAcquire(semUltrassonicHandle, pdMS_TO_TICKS(100)) == osOK)
+	        uint16_t usFreq = 0;   // 0 = buzzer desligado
+	        if (fDistance > 0.0f && fDistance < STOP_DISTANCE_CM)
 	        {
-	            uint32_t ticks = g_ultrasonicEchoTicks;
-	            float time_us = (float)ticks; // se timer configurado para 1us/tick
-	            fDistance = time_us * 0.017f; // cm (velocidade do som 340m/s)
+	            // Obstáculo muito próximo: parada imediata (prioridade na fila) + tom máximo
+	            osMessageQueuePut(qMotorCommandHandle, &xStopCmd, 1U, 0);
+	            usFreq = 2000;
+	        }
+	        else if (fDistance > 0.0f && fDistance < 20.0f)
+	        {
+	            // 20 cm -> 500 Hz ... 5 cm -> 2000 Hz (proporcional)
+	            usFreq = (uint16_t)(500.0f + (20.0f - fDistance) * (1500.0f / 15.0f));
+	            if (usFreq > 2000) usFreq = 2000;
+	        }
 
-	            if (fDistance < STOP_DISTANCE_CM)
-	            {
-	                osMessageQueuePut(qMotorCommandHandle, &stopCmd, 0, 0);
-	                // Aciona buzzer com frequência máxima (ex: PWM 2000Hz)
-	                // __HAL_TIM_SET_COMPARE(&htimXX, TIM_CHANNEL_YY, 500);
-	            }
-	            else if (fDistance < 20.0f)
-	            {
-	                uint16_t freq = (uint16_t)(500.0f + (20.0f - fDistance) * (1500.0f / 15.0f));
-	                if (freq > 2000) freq = 2000;
-	                // Ajusta PWM do buzzer
-	                // __HAL_TIM_SET_COMPARE(&htimXX, TIM_CHANNEL_YY, 500);
-	            }
-	            else
-	            {
-	                // Desliga buzzer
-	                // __HAL_TIM_SET_COMPARE(&htimXX, TIM_CHANNEL_YY, 0);
-	            }
+	        if (usFreq == 0)
+	        {
+	            __HAL_TIM_SET_COMPARE(&htim8, TIM_CHANNEL_1, 0);   // silencia
+	        }
+	        else
+	        {
+	            uint32_t ulArr = (ulBuzzerClkHz / usFreq) - 1U;
+	            __HAL_TIM_SET_AUTORELOAD(&htim8, ulArr);
+	            __HAL_TIM_SET_COMPARE(&htim8, TIM_CHANNEL_1, (ulArr + 1U) / 2U); // 50% duty
 	        }
 	    }
 
