@@ -22,7 +22,6 @@
 #include "task.h"
 #include "main.h"
 #include "cmsis_os.h"
-#include <math.h>
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
@@ -208,47 +207,33 @@ const osThreadAttr_t vTaskMotor_attributes = {
   .priority = (osPriority_t) osPriorityRealtime,
   .stack_size = 128 * 4
 };
-/* Definitions for vTaskSensorRead */
-osThreadId_t vTaskSensorReadHandle;
-const osThreadAttr_t vTaskSensorRead_attributes = {
-  .name = "vTaskSensorRead",
-  .priority = (osPriority_t) osPriorityHigh,
-  .stack_size = 128 * 4
-};
 /* Definitions for vTaskSegueLinha */
 osThreadId_t vTaskSegueLinhaHandle;
 const osThreadAttr_t vTaskSegueLinha_attributes = {
   .name = "vTaskSegueLinha",
   .priority = (osPriority_t) osPriorityHigh,
-  .stack_size = 128 * 4
+  .stack_size = 256 * 4
 };
 /* Definitions for vTaskOdometria */
 osThreadId_t vTaskOdometriaHandle;
 const osThreadAttr_t vTaskOdometria_attributes = {
   .name = "vTaskOdometria",
   .priority = (osPriority_t) osPriorityNormal,
-  .stack_size = 128 * 4
+  .stack_size = 256 * 4
 };
 /* Definitions for vTaskUART */
 osThreadId_t vTaskUARTHandle;
 const osThreadAttr_t vTaskUART_attributes = {
   .name = "vTaskUART",
   .priority = (osPriority_t) osPriorityBelowNormal4,
-  .stack_size = 128 * 4
+  .stack_size = 256 * 4
 };
 /* Definitions for vTaskLCD */
 osThreadId_t vTaskLCDHandle;
 const osThreadAttr_t vTaskLCD_attributes = {
   .name = "vTaskLCD",
   .priority = (osPriority_t) osPriorityLow,
-  .stack_size = 128 * 4
-};
-/* Definitions for vTaskButtons */
-osThreadId_t vTaskButtonsHandle;
-const osThreadAttr_t vTaskButtons_attributes = {
-  .name = "vTaskButtons",
-  .priority = (osPriority_t) osPriorityBelowNormal,
-  .stack_size = 128 * 4
+  .stack_size = 256 * 4
 };
 /* Definitions for vTaskTrocarModo */
 osThreadId_t vTaskTrocarModoHandle;
@@ -263,11 +248,6 @@ const osThreadAttr_t vTaskUltraBuzz_attributes = {
   .name = "vTaskUltraBuzz",
   .priority = (osPriority_t) osPriorityAboveNormal,
   .stack_size = 128 * 4
-};
-/* Definitions for qSensorsData */
-osMessageQueueId_t qSensorsDataHandle;
-const osMessageQueueAttr_t qSensorsData_attributes = {
-  .name = "qSensorsData"
 };
 /* Definitions for qMotorCommand */
 osMessageQueueId_t qMotorCommandHandle;
@@ -338,12 +318,10 @@ const osEventFlagsAttr_t evButtonsState_attributes = {
 void StartDefaultTask(void *argument);
 void vStartTaskCalibration(void *argument);
 void vStartTaskMotor(void *argument);
-void vStartTaskSensorRead(void *argument);
 void vStartTaskSegueLinha(void *argument);
 void vStartTaskOdometria(void *argument);
 void vStartTaskUART(void *argument);
 void vStartTaskLCD(void *argument);
-void vStartTaskButtons(void *argument);
 void vStartTaskTrocarModo(void *argument);
 void vStartTaskUltrassonicBuzzer(void *argument);
 
@@ -414,10 +392,10 @@ void MX_FREERTOS_Init(void) {
 
   /* Create the semaphores(s) */
   /* creation of semUltrassonic */
-  semUltrassonicHandle = osSemaphoreNew(1, 0, &semUltrassonic_attributes);
+  semUltrassonicHandle = osSemaphoreNew(1, 1, &semUltrassonic_attributes);
 
   /* creation of semBTRxReady */
-  semBTRxReadyHandle = osSemaphoreNew(128, 0, &semBTRxReady_attributes);
+  semBTRxReadyHandle = osSemaphoreNew(128, 128, &semBTRxReady_attributes);
 
   /* USER CODE BEGIN RTOS_SEMAPHORES */
   /* Arma a recepção da UART por interrupção (1 byte por vez) somente após o
@@ -430,11 +408,8 @@ void MX_FREERTOS_Init(void) {
   /* USER CODE END RTOS_TIMERS */
 
   /* Create the queue(s) */
-  /* creation of qSensorsData */
-  qSensorsDataHandle = osMessageQueueNew (5, sizeof(uint16_t), &qSensorsData_attributes);
-
   /* creation of qMotorCommand */
-  qMotorCommandHandle = osMessageQueueNew (8, sizeof(uint16_t), &qMotorCommand_attributes);
+  qMotorCommandHandle = osMessageQueueNew (12, sizeof(uint16_t), &qMotorCommand_attributes);
 
   /* creation of qTrocaModo */
   qTrocaModoHandle = osMessageQueueNew (2, sizeof(uint8_t), &qTrocaModo_attributes);
@@ -446,7 +421,7 @@ void MX_FREERTOS_Init(void) {
   qSystemStatusHandle = osMessageQueueNew (4, sizeof(uint8_t), &qSystemStatus_attributes);
 
   /* creation of qLCDData */
-  qLCDDataHandle = osMessageQueueNew (12, sizeof(uint64_t), &qLCDData_attributes);
+  qLCDDataHandle = osMessageQueueNew (32, sizeof(uint64_t), &qLCDData_attributes);
 
   /* USER CODE BEGIN RTOS_QUEUES */
   /* As filas geradas pelo CubeMX usam item-size incorreto (uint16_t/uint8_t/uint64_t)
@@ -474,9 +449,6 @@ void MX_FREERTOS_Init(void) {
   /* creation of vTaskMotor */
   vTaskMotorHandle = osThreadNew(vStartTaskMotor, NULL, &vTaskMotor_attributes);
 
-  /* creation of vTaskSensorRead */
-  vTaskSensorReadHandle = osThreadNew(vStartTaskSensorRead, NULL, &vTaskSensorRead_attributes);
-
   /* creation of vTaskSegueLinha */
   vTaskSegueLinhaHandle = osThreadNew(vStartTaskSegueLinha, NULL, &vTaskSegueLinha_attributes);
 
@@ -488,9 +460,6 @@ void MX_FREERTOS_Init(void) {
 
   /* creation of vTaskLCD */
   vTaskLCDHandle = osThreadNew(vStartTaskLCD, NULL, &vTaskLCD_attributes);
-
-  /* creation of vTaskButtons */
-  vTaskButtonsHandle = osThreadNew(vStartTaskButtons, NULL, &vTaskButtons_attributes);
 
   /* creation of vTaskTrocarModo */
   vTaskTrocarModoHandle = osThreadNew(vStartTaskTrocarModo, NULL, &vTaskTrocarModo_attributes);
@@ -637,24 +606,6 @@ void vStartTaskMotor(void *argument)
 	    }
 
   /* USER CODE END vStartTaskMotor */
-}
-
-/* USER CODE BEGIN Header_vStartTaskSensorRead */
-/**
-* @brief Function implementing the vTaskSensorRead thread.
-* @param argument: Not used
-* @retval None
-*/
-/* USER CODE END Header_vStartTaskSensorRead */
-void vStartTaskSensorRead(void *argument)
-{
-  /* USER CODE BEGIN vStartTaskSensorRead */
-	    // OBSOLETA no modelo final: a leitura dos sensores + bateria + binarização +
-	    // parada por bateria baixa migrou para vTaskSegueLinha (que roda sempre, em
-	    // ambos os modos). Esta task se auto-remove. Recomendado também removê-la na IOC.
-	    (void)argument;
-	    vTaskDelete(NULL);
-  /* USER CODE END vStartTaskSensorRead */
 }
 
 /* USER CODE BEGIN Header_vStartTaskSegueLinha */
@@ -993,25 +944,6 @@ void vStartTaskLCD(void *argument)
 	    }
 
   /* USER CODE END vStartTaskLCD */
-}
-
-/* USER CODE BEGIN Header_vStartTaskButtons */
-/**
-* @brief Function implementing the vTaskButtons thread.
-* @param argument: Not used
-* @retval None
-*/
-/* USER CODE END Header_vStartTaskButtons */
-void vStartTaskButtons(void *argument)
-{
-  /* USER CODE BEGIN vStartTaskButtons */
-	    // OBSOLETA no modelo final: o tratamento dos botões passou para a ISR (I5).
-	    // A EXTI chama vButtonsDebouncingStart; o TIM7 conclui o debounce e os callbacks
-	    // vButtonsPressedCallback/Released postam em qButtonsEvent. Esta task se auto-remove.
-	    // Recomendado também removê-la na IOC (junto com o event group evButtonsState).
-	    (void)argument;
-	    vTaskDelete(NULL);
-  /* USER CODE END vStartTaskButtons */
 }
 
 /* USER CODE BEGIN Header_vStartTaskTrocarModo */
