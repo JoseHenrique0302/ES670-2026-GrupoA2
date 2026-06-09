@@ -1,0 +1,20 @@
+# Força LF para todos os arquivos de texto — evita conflitos Mac/Windows
+* text=auto eol=lf
+
+# Arquivos de código C/H — sempre LF
+*.c text eol=lf
+*.h text eol=lf
+*.s text eol=lf
+*.ld text eol=lf
+*.mk text eol=lf
+*.ioc text eol=lf
+*.xml text eol=lf
+*.project text eol=lf
+*.cproject text eol=lf
+
+# Binários — não tocar nas terminações
+*.elf binary
+*.bin binary
+*.hex binary
+*.a binary
+*.o binary

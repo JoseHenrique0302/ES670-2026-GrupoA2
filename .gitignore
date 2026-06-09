@@ -1,0 +1,54 @@
+# ============================================================
+# STM32CubeIDE / Eclipse — artefatos de build e workspace
+# ============================================================
+
+# Pasta de saída do build (Debug / Release)
+Debug/
+Release/
+
+# Metadados do workspace Eclipse (ficam fora do projeto)
+.metadata/
+
+# Arquivos de configuração pessoal do Eclipse (gerados por máquina)
+.settings/language.settings.xml
+
+# ============================================================
+# Arquivos compilados / linkados
+# ============================================================
+*.elf
+*.bin
+*.hex
+*.map
+*.list
+*.o
+*.d
+*.su
+*.cyclo
+*.a
+
+# ============================================================
+# macOS
+# ============================================================
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+
+# ============================================================
+# Windows
+# ============================================================
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+
+# ============================================================
+# VS Code (opcional — mantenha se quiser compartilhar config)
+# ============================================================
+# .vscode/
+
+# ============================================================
+# Outros IDEs
+# ============================================================
+*.iml
+.idea/
