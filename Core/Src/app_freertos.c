@@ -140,7 +140,11 @@ typedef struct {
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
-
+// Habilita o subsistema ultrassom + buzzer. Em 0, a vTaskUltraBuzz NÃO lê o
+// sensor nem aciona o buzzer e o trigger (TIM20/TIM3) nem é iniciado — evita o
+// alarme falso (pino de eco flutuando lê <5cm -> zona de STOP -> freq. máxima)
+// enquanto focamos no seguir-linha. Para REABILITAR no futuro: trocar para 1.
+#define ULTRASONIC_BUZZER_ENABLED   0
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -375,7 +379,9 @@ void MX_FREERTOS_Init(void) {
     lcdPrintStr((uint8_t*)"Robot Ready", 11);
 
     // Inicializa o sensor ultrassônico (assumindo TIM20 como trigger, TIM3 como echo)
+#if (ULTRASONIC_BUZZER_ENABLED != 0)
     vDistanceSensorInit(&htim20, TIM_CHANNEL_1, &htim3, TIM_CHANNEL_1);
+#endif
   /* USER CODE END Init */
   /* Create the mutex(es) */
   /* creation of mutexTelemetry */
@@ -734,8 +740,10 @@ void vStartTaskOdometria(void *argument)
 	    const TickType_t xPeriod = pdMS_TO_TICKS(TASK_PERIOD_ODOMETRY);
 	    TickType_t xLastWakeTime = xTaskGetTickCount();
 	    static float fLastLeftCount = 0, fLastRightCount = 0;
-	    const float WHEEL_BASE = 0.2f;
-	    const float WHEEL_RADIUS = 0.03f;
+	    const float WHEEL_BASE = 0.133f;    // distância entre rodas: 133 mm (medido)
+	    const float WHEEL_RADIUS = 0.0315f; // raio da roda: diâmetro 63 mm / 2 (medido)
+	    // TODO: PPR = pulsos por VOLTA da roda. Valor provisório! Medir girando a roda
+	    // 1 volta completa e lendo o delta de gvEncoderCounts (ver instruções).
 	    const float PPR = 400.0f;
 	    static float fSpeedSum = 0.0f;
 	    static int speedCount = 0;
@@ -1036,10 +1044,20 @@ void vStartTaskTrocarModo(void *argument)
 void vStartTaskUltrassonicBuzzer(void *argument)
 {
   /* USER CODE BEGIN vStartTaskUltrassonicBuzzer */
+	    (void)argument;
+#if (ULTRASONIC_BUZZER_ENABLED == 0)
+	    // Subsistema ultrassom + buzzer DESABILITADO (foco no seguir-linha).
+	    // Garante o buzzer em silêncio e deixa a task ociosa. Totalmente reversível:
+	    // basta definir ULTRASONIC_BUZZER_ENABLED como 1 (no bloco USER CODE PD).
+	    __HAL_TIM_SET_COMPARE(&htim8, TIM_CHANNEL_1, 0);
+	    for(;;)
+	    {
+	        vTaskDelay(pdMS_TO_TICKS(1000));
+	    }
+#else
 	    // Abordagem escolhida: usa o driver distanceSensor.c (captura por DMA).
 	    // O trigger é gerado continuamente pelo PWM do TIM20 (configurado no init);
 	    // aqui apenas lemos a distância já calculada e acionamos o buzzer.
-	    (void)argument;
 	    const TickType_t xPeriod = pdMS_TO_TICKS(TASK_PERIOD_ULTRASONIC);
 	    TickType_t xLastWakeTime = xTaskGetTickCount();
 	    MotorCommand_t xStopCmd = {0.0f, 0.0f, 0};   // ucCmdType 0 = STOP
@@ -1049,24 +1067,48 @@ void vStartTaskUltrassonicBuzzer(void *argument)
 	    // Frequência do tom = 1e6 / (ARR+1). Duty 50% => compare = (ARR+1)/2.
 	    const uint32_t ulBuzzerClkHz = 1000000UL;
 
+	    // Filtro de plausibilidade do ultrassom. A captura por DMA (BOTHEDGE, buffer
+	    // circular de 2 posições sobre o TIM3 livre) gera leituras espúrias entre ecos
+	    // e quando o sensor não está conectado, o que fazia o buzzer tocar sem parar.
+	    // Só acionamos o buzzer após ucUltraConfirm leituras CONSECUTIVAS dentro da
+	    // faixa válida; qualquer leitura fora/implausível zera a contagem.
+	    const float   fUltraMinCm    = 2.0f;    // < 2 cm = espúrio (mínimo do HC-SR04)
+	    const float   fUltraAlertCm  = 20.0f;   // distância em que começa a apitar
+	    const uint8_t ucUltraConfirm = 3U;      // leituras consecutivas p/ confirmar
+	    uint8_t       ucNearCount    = 0U;
+
 	    for(;;)
 	    {
 	        vTaskDelayUntil(&xLastWakeTime, xPeriod);
 
 	        fDistance = fDistanceSensorGetDistance();   // cm (driver DMA)
 
-	        uint16_t usFreq = 0;   // 0 = buzzer desligado
-	        if (fDistance > 0.0f && fDistance < STOP_DISTANCE_CM)
+	        // Leitura considerada "perto e válida"? Exige consistência antes de apitar.
+	        if (fDistance >= fUltraMinCm && fDistance < fUltraAlertCm)
 	        {
-	            // Obstáculo muito próximo: parada imediata (prioridade na fila) + tom máximo
-	            osMessageQueuePut(qMotorCommandHandle, &xStopCmd, 1U, 0);
-	            usFreq = 2000;
+	            if (ucNearCount < ucUltraConfirm) ucNearCount++;
 	        }
-	        else if (fDistance > 0.0f && fDistance < 20.0f)
+	        else
 	        {
-	            // 20 cm -> 500 Hz ... 5 cm -> 2000 Hz (proporcional)
-	            usFreq = (uint16_t)(500.0f + (20.0f - fDistance) * (1500.0f / 15.0f));
-	            if (usFreq > 2000) usFreq = 2000;
+	            ucNearCount = 0U;   // leitura fora da faixa -> mata o ruído do sensor
+	        }
+
+	        uint16_t usFreq = 0;   // 0 = buzzer desligado
+	        if (ucNearCount >= ucUltraConfirm)
+	        {
+	            if (fDistance < STOP_DISTANCE_CM)
+	            {
+	                // Obstáculo muito próximo: parada imediata (prioridade na fila) + tom máximo
+	                osMessageQueuePut(qMotorCommandHandle, &xStopCmd, 1U, 0);
+	                usFreq = 2000;
+	            }
+	            else
+	            {
+	                // 20 cm -> 500 Hz ... 5 cm -> 2000 Hz (proporcional)
+	                usFreq = (uint16_t)(500.0f + (fUltraAlertCm - fDistance) *
+	                                    (1500.0f / (fUltraAlertCm - STOP_DISTANCE_CM)));
+	                if (usFreq > 2000) usFreq = 2000;
+	            }
 	        }
 
 	        if (usFreq == 0)
@@ -1080,6 +1122,7 @@ void vStartTaskUltrassonicBuzzer(void *argument)
 	            __HAL_TIM_SET_COMPARE(&htim8, TIM_CHANNEL_1, (ulArr + 1U) / 2U); // 50% duty
 	        }
 	    }
+#endif /* ULTRASONIC_BUZZER_ENABLED */
 
   /* USER CODE END vStartTaskUltrassonicBuzzer */
 }
