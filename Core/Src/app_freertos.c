@@ -973,17 +973,44 @@ void vStartTaskTrocarModo(void *argument)
 	        if (osMessageQueueGet(qTrocaModoHandle, &ucMode, NULL, pdMS_TO_TICKS(50)) == osOK)
 	            ucNewMode = ucMode;
 
-	        // 2) Eventos dos botões físicos (produzidos pela ISR I5): ENTER alterna o modo
+	        // 2) Eventos dos botões físicos (produzidos pela ISR I5).
+	        //    Só reage ao PRESS (ucEventType == 0):
+	        //      ENTER -> alterna AUTO/MANUAL
+	        //      UP    -> força modo AUTÔNOMO (inicia o seguimento de linha)
+	        //      DOWN  -> força modo MANUAL  (para o seguimento de linha)
 	        while (osMessageQueueGet(qButtonsEventHandle, &xBtn, NULL, 0) == osOK)
 	        {
-	            if (xBtn.ucButtonId == BUTTONS_BUTTON_ENTER && xBtn.ucEventType == 0)
-	                ucNewMode = (ucCurrentMode == MODE_AUTONOMOUS) ? MODE_MANUAL : MODE_AUTONOMOUS;
+	            if (xBtn.ucEventType != 0) continue;   // ignora RELEASE
+
+	            switch (xBtn.ucButtonId)
+	            {
+	                case BUTTONS_BUTTON_ENTER:
+	                    ucNewMode = (ucNewMode == MODE_AUTONOMOUS) ? MODE_MANUAL : MODE_AUTONOMOUS;
+	                    break;
+	                case BUTTONS_BUTTON_UP:
+	                    ucNewMode = MODE_AUTONOMOUS;
+	                    break;
+	                case BUTTONS_BUTTON_DOWN:
+	                    ucNewMode = MODE_MANUAL;
+	                    break;
+	                default:
+	                    break;
+	            }
 	        }
 
 	        if (ucNewMode != ucCurrentMode)
 	        {
 	            ucCurrentMode = ucNewMode;
 	            gvSystemMode = ucCurrentMode;   // <- vTaskSegueLinha passa a (não) rodar o PID
+
+	            // SEGURANÇA: ao sair do modo AUTÔNOMO a vTaskSegueLinha deixa de enviar
+	            // comandos e o vTaskMotor manteria a ÚLTIMA velocidade aplicada (robô sai
+	            // andando). Envia um STOP explícito para garantir que o robô pare de fato.
+	            if (ucCurrentMode == MODE_MANUAL)
+	            {
+	                MotorCommand_t xStopCmd = {0.0f, 0.0f, 0};  // ucCmdType 0 = STOP
+	                osMessageQueuePut(qMotorCommandHandle, &xStopCmd, 1U, 0);
+	            }
 
 	            if (osMutexAcquire(mutexTelemetryHandle, pdMS_TO_TICKS(5)) == osOK)
 	            {
