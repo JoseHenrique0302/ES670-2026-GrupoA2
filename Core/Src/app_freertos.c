@@ -133,7 +133,8 @@ typedef struct {
 
 // Outros defines
 #define MAX_ENCODER_COUNTS      1000000UL
-#define MIN_BATTERY_VOLTAGE_MV  5500   // 5.5V
+#define MIN_BATTERY_VOLTAGE_MV  5500   // 5.5V (legado, não usado)
+#define BATTERY_MIN_PCT         10U    // emergência se carga < 10%
 #define STOP_DISTANCE_CM        5.0f
 
 /* USER CODE END PTD */
@@ -347,6 +348,19 @@ void MX_FREERTOS_Init(void) {
     gvEncoderCounts[1] = 0;
     g_ultrasonicEchoTicks = 0;
 
+    // Ganhos PID padrão do seguir-linha. SEM isto ficavam em 0 (memset) e a
+    // vTaskSegueLinha não gerava NENHUMA correção -> robô só andava reto.
+    // Ajustáveis em tempo de execução via "SET_PID kp ki kd" (UART).
+    gvPIDParams.fKp = 0.5f;
+    gvPIDParams.fKi = 0.0f;
+    gvPIDParams.fKd = 0.1f;
+
+    // Limiar de binarização padrão (meio da escala de 12 bits). Fallback caso o
+    // usuário rode o seguir-linha SEM calibrar. O ideal é sempre calibrar antes
+    // (botão ESQ ou comando "CALIBRATE"), que sobrescreve estes valores.
+    for (int i = 0; i < 5; i++)
+        gvCalibData.usIRThreshold[i] = 2048U;
+
     // Inicializa os periféricos
     vLineSensorsInit();
     vBatteryInit();
@@ -554,8 +568,9 @@ void vStartTaskCalibration(void *argument)
 	        }
 
 	        osMessageQueuePut(qSystemStatusHandle, &ucStatus, 0, 0);
-	        // Volta a suspender
-	        vTaskSuspend(NULL);
+	        // Volta ao topo do laço, onde vTaskSuspend(NULL) suspende de novo até a
+	        // próxima solicitação. (Antes havia um 2º suspend aqui, que fazia a cada
+	        // 2 acionamentos um deles NÃO calibrar.)
 	    }
 
 
@@ -666,8 +681,12 @@ void vStartTaskSegueLinha(void *argument)
 	            gvTelemetry.batteryPct = ucBatteryPct;
 	            osMutexRelease(mutexTelemetryHandle);
 	        }
-	        uint16_t usBattery_mV = (uint16_t)(((uint32_t)usBatteryRaw * 3300U) / 4095U);
-	        if (usBattery_mV < MIN_BATTERY_VOLTAGE_MV)
+	        // Emergência por bateria fraca usando a PORCENTAGEM calibrada (battery.c).
+	        // ATENÇÃO: a versão antiga convertia o raw para mV (max 3,3V = 3300mV) e
+	        // comparava com 5500mV -> a condição era SEMPRE verdadeira, a emergência
+	        // ligava no 1º ciclo e os motores NUNCA rodavam. O guard usBatteryRaw>100
+	        // evita falso disparo no boot, antes do ADC/DMA converter (leitura ~0).
+	        if (usBatteryRaw > 100U && ucBatteryPct < BATTERY_MIN_PCT)
 	            osEventFlagsSet(evEmergencyHandle, EMERGENCY_BIT);
 
 	        /* ---- 3) Controle de linha: só no modo AUTÔNOMO ---- */
@@ -742,9 +761,7 @@ void vStartTaskOdometria(void *argument)
 	    static float fLastLeftCount = 0, fLastRightCount = 0;
 	    const float WHEEL_BASE = 0.133f;    // distância entre rodas: 133 mm (medido)
 	    const float WHEEL_RADIUS = 0.0315f; // raio da roda: diâmetro 63 mm / 2 (medido)
-	    // TODO: PPR = pulsos por VOLTA da roda. Valor provisório! Medir girando a roda
-	    // 1 volta completa e lendo o delta de gvEncoderCounts (ver instruções).
-	    const float PPR = 400.0f;
+	    const float PPR = 20.0f;            // pulsos por volta da roda (medido: 20)
 	    static float fSpeedSum = 0.0f;
 	    static int speedCount = 0;
 	    char lcdLine1[17], lcdLine2[17];
@@ -978,6 +995,7 @@ void vStartTaskTrocarModo(void *argument)
 	    for(;;)
 	    {
 	        ucNewMode = ucCurrentMode;
+	        uint8_t ucDoMotorTest = 0;   // DIR: teste de motor (rodas pra frente)
 
 	        // 1) Comando de modo vindo do Bluetooth (T7) - bloqueia até 50 ms
 	        if (osMessageQueueGet(qTrocaModoHandle, &ucMode, NULL, pdMS_TO_TICKS(50)) == osOK)
@@ -1002,6 +1020,17 @@ void vStartTaskTrocarModo(void *argument)
 	                    break;
 	                case BUTTONS_BUTTON_DOWN:
 	                    ucNewMode = MODE_MANUAL;
+	                    break;
+	                case BUTTONS_BUTTON_LEFT:
+	                    // Calibra os sensores. Mantenha o robô sobre a pista e
+	                    // deslize-o cruzando a linha durante ~200 ms após apertar.
+	                    vTaskResume(vTaskCalibracaoHandle);
+	                    break;
+	                case BUTTONS_BUTTON_RIGHT:
+	                    // TESTE DE MOTOR: roda as duas rodas pra frente a 30%.
+	                    // Força MANUAL (p/ o seguir-linha não sobrescrever); DOWN para.
+	                    ucNewMode = MODE_MANUAL;
+	                    ucDoMotorTest = 1;
 	                    break;
 	                default:
 	                    break;
@@ -1029,6 +1058,14 @@ void vStartTaskTrocarModo(void *argument)
 	            }
 	            uint8_t ucStatus = (ucCurrentMode == MODE_AUTONOMOUS) ? 0x02 : 0x03;
 	            osMessageQueuePut(qSystemStatusHandle, &ucStatus, 0, 0);
+	        }
+
+	        // Teste de motor (botão DIR): postado por ÚLTIMO, depois do eventual STOP
+	        // da transição para MANUAL, para que o comando que prevaleça seja "andar".
+	        if (ucDoMotorTest)
+	        {
+	            MotorCommand_t xTestCmd = { 0.3f, 0.3f, 2 };  // 30% nas duas, MANUAL
+	            osMessageQueuePut(qMotorCommandHandle, &xTestCmd, 0, 0);
 	        }
 	    }
   /* USER CODE END vStartTaskTrocarModo */
