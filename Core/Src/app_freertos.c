@@ -225,14 +225,14 @@ osThreadId_t vTaskOdometriaHandle;
 const osThreadAttr_t vTaskOdometria_attributes = {
   .name = "vTaskOdometria",
   .priority = (osPriority_t) osPriorityNormal,
-  .stack_size = 256 * 4
+  .stack_size = 512 * 4   /* snprintf com float (-u_printf_float) precisa de >1KB */
 };
 /* Definitions for vTaskUART */
 osThreadId_t vTaskUARTHandle;
 const osThreadAttr_t vTaskUART_attributes = {
   .name = "vTaskUART",
   .priority = (osPriority_t) osPriorityBelowNormal4,
-  .stack_size = 256 * 4
+  .stack_size = 512 * 4   /* txBuffer[256] + snprintf/sscanf com float -> >1.5KB */
 };
 /* Definitions for vTaskLCD */
 osThreadId_t vTaskLCDHandle;
@@ -791,9 +791,11 @@ void vStartTaskOdometria(void *argument)
 	            gvTelemetry.posX += fDeltaDist * (float)cosf((double)gvTelemetry.theta);
 	            gvTelemetry.posY += fDeltaDist * (float)sinf((double)gvTelemetry.theta);
 	            gvTelemetry.theta += fDeltaTheta;
-	            // Normaliza theta
-	            if (gvTelemetry.theta > PI) gvTelemetry.theta -= 2.0f * PI;
-	            if (gvTelemetry.theta < PI) gvTelemetry.theta += 2.0f * PI;
+	            // Normaliza theta para (-PI, PI]. ATENÇÃO: a 2ª condição era "< PI"
+	            // (faltava o sinal de menos): como quase todo theta é < PI, somava 2*PI
+	            // todo ciclo -> theta explodia e posX/posY/etc viravam lixo.
+	            if (gvTelemetry.theta >  PI) gvTelemetry.theta -= 2.0f * PI;
+	            if (gvTelemetry.theta < -PI) gvTelemetry.theta += 2.0f * PI;
 
 	            float fSpeed = fDeltaDist / (TASK_PERIOD_ODOMETRY / 1000.0f);
 	            gvTelemetry.speedCurrent = fSpeed;
