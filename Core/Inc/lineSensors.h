@@ -8,11 +8,34 @@
  *
  * @author    Matheus
  * @date      25-Apr-2026
- * @version   1.0
+ * @version   2.0
  */
 
 #ifndef LINESENSORS_H
 #define LINESENSORS_H
+
+#include <stdint.h>
+
+#define LINESENSORS_SENSOR_COUNT 5U
+#define LINESENSORS_ADC_COUNT    5U
+
+typedef enum
+{
+  LINESENSORS_ADC_1,
+  LINESENSORS_ADC_2,
+  LINESENSORS_ADC_3,
+  LINESENSORS_ADC_4,
+  LINESENSORS_ADC_5
+} lineSensorsAdcEnum_t;
+
+typedef enum
+{
+  LINESENSORS_RANK_1,
+  LINESENSORS_RANK_2,
+  LINESENSORS_RANK_3,
+  LINESENSORS_RANK_4,
+  LINESENSORS_RANK_5
+} lineSensorsRankEnum_t;
 
 typedef enum
 {
@@ -26,27 +49,42 @@ typedef enum
 /**
  * @brief Initializes the line sensors and starts ADC DMA acquisition.
  *
- * Configures the ADC channels used by the line sensors, associates
- * each sensor with its corresponding buffer, sets the interpolation
- * weights, and resets the calibration values.
+ * Configures the ADC and rank used by each line sensor, starts only the
+ * ADC DMA acquisitions that are required, associates each sensor with
+ * the correct DMA buffer position, configures the interpolation weights,
+ * and resets the calibration values.
+ *
+ * @param xLeftAdc ADC used by the left sensor.
+ * @param xLeftRank Rank used by the left sensor.
+ * @param xCenterLeftAdc ADC used by the center-left sensor.
+ * @param xCenterLeftRank Rank used by the center-left sensor.
+ * @param xCenterAdc ADC used by the center sensor.
+ * @param xCenterRank Rank used by the center sensor.
+ * @param xCenterRightAdc ADC used by the center-right sensor.
+ * @param xCenterRightRank Rank used by the center-right sensor.
+ * @param xRightAdc ADC used by the right sensor.
+ * @param xRightRank Rank used by the right sensor.
  */
-void vLineSensorsInit(void);
+void vLineSensors_v2_Init(lineSensorsAdcEnum_t xLeftAdc,
+                      lineSensorsRankEnum_t xLeftRank,
+                      lineSensorsAdcEnum_t xCenterLeftAdc,
+                      lineSensorsRankEnum_t xCenterLeftRank,
+                      lineSensorsAdcEnum_t xCenterAdc,
+                      lineSensorsRankEnum_t xCenterRank,
+                      lineSensorsAdcEnum_t xCenterRightAdc,
+                      lineSensorsRankEnum_t xCenterRightRank,
+                      lineSensorsAdcEnum_t xRightAdc,
+                      lineSensorsRankEnum_t xRightRank);
 
 /**
  * @brief Resets the calibration limits of all line sensors.
- *
- * Initializes the minimum and maximum values used during the
- * calibration process.
  */
-void vLineSensorsResetCalibration(void);
+void vLineSensors_v2_ResetCalibration(void);
 
 /**
  * @brief Updates the calibration limits using the current ADC readings.
- *
- * Compares the current sensor readings with the stored calibration
- * limits and updates the minimum and maximum values when necessary.
  */
-void vLineSensorsUpdateCalibration(void);
+void vLineSensors_v2_UpdateCalibration(void);
 
 /**
  * @brief Returns the normalized value of a selected line sensor.
@@ -54,18 +92,12 @@ void vLineSensorsUpdateCalibration(void);
  * @param xSensor Selected sensor identifier.
  * @return Normalized sensor value in the range from 0.0 to 1.0.
  */
-float fLineSensorsGetSensorValue(lineSensorsEnum_t xSensor);
+float fLineSensors_v2_GetSensorValue(lineSensorsEnum_t xSensor);
 
 /**
  * @brief Sets the interpolation weights used by the line sensors.
- *
- * @param fLeftWeigth Weight assigned to the left sensor.
- * @param fCenterLeftWeigth Weight assigned to the center-left sensor.
- * @param fCenterWeigth Weight assigned to the center sensor.
- * @param fCenterRightWeigth Weight assigned to the center-right sensor.
- * @param fRightWeigth Weight assigned to the right sensor.
  */
-void vLineSensorsSetInterpolationWeigths(float fLeftWeigth,
+void vLineSensors_v2_SetInterpolationWeigths(float fLeftWeigth,
   float fCenterLeftWeigth,
   float fCenterWeigth,
   float fCenterRightWeigth,
@@ -76,10 +108,6 @@ void vLineSensorsSetInterpolationWeigths(float fLeftWeigth,
  *
  * @return Interpolated line position based on the configured weights.
  */
-float fLineSensorsGetInterpolatedValue(void);
-
-float fLineSensorGetRawValue(lineSensorsEnum_t xSensor);
-float fLineSensorGetMax(lineSensorsEnum_t xSensor);
-float fLineSensorGetMin(lineSensorsEnum_t xSensor);
+float fLineSensors_v2_GetInterpolatedValue(void);
 
 #endif // LINESENSORS_H

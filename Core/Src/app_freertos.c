@@ -362,7 +362,15 @@ void MX_FREERTOS_Init(void) {
         gvCalibData.usIRThreshold[i] = 2048U;
 
     // Inicializa os periféricos
-    vLineSensorsInit();
+    // Driver v2: mapeamento sensor->ADC/rank explícito. Replica o mapeamento
+    // do driver antigo (ESQ=ADC2 rank1, CL=ADC2 rank2, C=ADC3 rank1,
+    // CR=ADC2 rank3, DIR=ADC5 rank1). >>> CONFIRMAR NA BANCADA <<< se o ADC/rank
+    // de cada sensor físico está correto (era a suspeita do mapeamento errado).
+    vLineSensors_v2_Init(LINESENSORS_ADC_2, LINESENSORS_RANK_1,   // LEFT
+                         LINESENSORS_ADC_2, LINESENSORS_RANK_2,   // CENTERLEFT
+                         LINESENSORS_ADC_3, LINESENSORS_RANK_1,   // CENTER
+                         LINESENSORS_ADC_2, LINESENSORS_RANK_3,   // CENTERRIGHT
+                         LINESENSORS_ADC_5, LINESENSORS_RANK_1);  // RIGHT
     vBatteryInit();
     vMotorEncoderInitMotors(MOTOR_DIR_IN1_GPIO_Port, MOTOR_DIR_IN1_Pin,
                             MOTOR_DIR_IN2_GPIO_Port, MOTOR_DIR_IN2_Pin,
@@ -540,24 +548,14 @@ void vStartTaskCalibration(void *argument)
 	    {
 	        vTaskSuspend(NULL);   // aguarda ser resumida por T7
 
-	        // Reseta e atualiza calibração
-	        vLineSensorsResetCalibration();
+	        // Reseta e atualiza calibração. O driver v2 guarda min/max de cada
+	        // sensor internamente; a normalização (fLineSensors_v2_GetSensorValue)
+	        // já usa esses limites, então não há limiar a calcular aqui.
+	        vLineSensors_v2_ResetCalibration();
 	        for (int i = 0; i < 20; i++)   // 200ms de amostragem
 	        {
-	            vLineSensorsUpdateCalibration();
+	            vLineSensors_v2_UpdateCalibration();
 	            vTaskDelay(pdMS_TO_TICKS(10));
-	        }
-
-	        // Salva os limiares em GV3
-	        if (osMutexAcquire(mutexCalibDataHandle, pdMS_TO_TICKS(100)) == osOK)
-	        {
-	            for (int i = 0; i < 5; i++)
-	            {
-	                uint16_t usMax = fLineSensorGetMax((lineSensorsEnum_t)i);
-	                uint16_t usMin = fLineSensorGetMin((lineSensorsEnum_t)i);
-	                gvCalibData.usIRThreshold[i] = (usMax + usMin) / 2;
-	            }
-	            osMutexRelease(mutexCalibDataHandle);
 	        }
 
 	        // Atualiza flag na telemetria
@@ -661,17 +659,12 @@ void vStartTaskSegueLinha(void *argument)
 	    {
 	        vTaskDelayUntil(&xLastWakeTime, xPeriod);
 
-	        /* ---- 1) Leitura + binarização dos 5 sensores IR (sempre) ---- */
-	        uint16_t usRaw[5];
+	        /* ---- 1) Leitura normalizada (0..1) + binarização dos 5 sensores (sempre) ---- */
+	        // Driver v2: GetSensorValue já normaliza usando o min/max calibrado.
+	        // Binariza em 0.5: 1 = sensor "vê a linha". Se a polaridade estiver
+	        // invertida na bancada, basta trocar "> 0.5f" por "< 0.5f".
 	        for (int i = 0; i < 5; i++)
-	            usRaw[i] = (uint16_t)fLineSensorGetRawValue((lineSensorsEnum_t)i);
-
-	        if (osMutexAcquire(mutexCalibDataHandle, pdMS_TO_TICKS(5)) == osOK)
-	        {
-	            for (int i = 0; i < 5; i++)
-	                ucIRBin[i] = (usRaw[i] > gvCalibData.usIRThreshold[i]) ? 1U : 0U;
-	            osMutexRelease(mutexCalibDataHandle);
-	        }
+	            ucIRBin[i] = (fLineSensors_v2_GetSensorValue((lineSensorsEnum_t)i) > 0.5f) ? 1U : 0U;
 
 	        /* ---- 2) Bateria + parada de emergência por subtensão (sempre) ---- */
 	        uint16_t usBatteryRaw = usBatteryGetRawValue();

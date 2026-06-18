@@ -2,69 +2,117 @@
  * @file      lineSensors.c
  * @brief     Implements the line sensor acquisition and interpolation.
  *
- * This file contains the functions required to initialize the line
- * sensors, update their calibration limits, read normalized values,
- * and calculate the interpolated line position.
+ * Versão 2 (driver do professor) com mapeamento sensor->ADC/rank
+ * configurável. Único ajuste em relação ao arquivo original do professor:
+ * o init usa os handles ADC REAIS do projeto (hadc1/2/3/5, definidos em
+ * adc.c) em vez de handles locais só com .Instance — caso contrário o
+ * HAL_ADC_Start_DMA acessaria DMA_Handle inválido e travaria no boot.
  *
  * @author    Matheus
  * @date      25-Apr-2026
- * @version   1.0
+ * @version   2.0
  */
-
-#ifndef LINESENSORS_C
-#define LINESENSORS_C
 
 #include "lineSensors.h"
 #include "main.h"
 #include "adc.h"
 
+#define LINESENSORS_INITIAL_MAX  1500U
+#define LINESENSORS_INITIAL_MIN  1000U
+
 typedef struct
 {
-  uint16_t usBuffer124[3];
-  uint16_t usBuffer3;
-  uint16_t usBuffer5;
-  uint16_t *pBuffer[5];
-  uint16_t usMax[5];
-  uint16_t usMin[5];
-  float fWeigths[5];
+  lineSensorsAdcEnum_t xAdc;
+  lineSensorsRankEnum_t xRank;
+} lineSensorsConfig_t;
+
+typedef struct
+{
+  uint16_t usBufferAdc1[LINESENSORS_SENSOR_COUNT];
+  uint16_t usBufferAdc2[LINESENSORS_SENSOR_COUNT];
+  uint16_t usBufferAdc3[LINESENSORS_SENSOR_COUNT];
+  uint16_t usBufferAdc4[LINESENSORS_SENSOR_COUNT];
+  uint16_t usBufferAdc5[LINESENSORS_SENSOR_COUNT];
+  uint16_t *pBuffer[LINESENSORS_SENSOR_COUNT];
+  uint16_t usMax[LINESENSORS_SENSOR_COUNT];
+  uint16_t usMin[LINESENSORS_SENSOR_COUNT];
+  float fWeigths[LINESENSORS_SENSOR_COUNT];
 } lineSensorsAttributes_t;
 
-#define LINESENSORS_SENSOR_COUNT 5U
-#define LINESENSORS_INITIAL_MAX  2000U
-#define LINESENSORS_INITIAL_MIN  1500U
+static lineSensorsAttributes_t xLineSensorsAttributes;
 
-lineSensorsAttributes_t xLineSensorsAttributes;
-
-/**
- * @brief Initializes the line sensors and starts ADC DMA acquisition.
- *
- * Starts the ADC peripherals in DMA mode, associates each sensor with
- * its respective buffer, configures the interpolation weights, and
- * resets the calibration values.
- */
-void vLineSensorsInit(void)
+void vLineSensors_v2_Init(lineSensorsAdcEnum_t xLeftAdc,
+                      lineSensorsRankEnum_t xLeftRank,
+                      lineSensorsAdcEnum_t xCenterLeftAdc,
+                      lineSensorsRankEnum_t xCenterLeftRank,
+                      lineSensorsAdcEnum_t xCenterAdc,
+                      lineSensorsRankEnum_t xCenterRank,
+                      lineSensorsAdcEnum_t xCenterRightAdc,
+                      lineSensorsRankEnum_t xCenterRightRank,
+                      lineSensorsAdcEnum_t xRightAdc,
+                      lineSensorsRankEnum_t xRightRank)
 {
-  HAL_ADC_Start_DMA(&hadc2, (uint32_t *)xLineSensorsAttributes.usBuffer124, 3);
-  HAL_ADC_Start_DMA(&hadc3, (uint32_t *)&xLineSensorsAttributes.usBuffer3, 1);
-  HAL_ADC_Start_DMA(&hadc5, (uint32_t *)&xLineSensorsAttributes.usBuffer5, 1);
+  lineSensorsConfig_t xConfig[LINESENSORS_SENSOR_COUNT];
+  unsigned char ucAdcCount[LINESENSORS_ADC_COUNT] = {0U};
+  unsigned char ucIndex;
+  uint16_t *pAdcBuffer[LINESENSORS_ADC_COUNT];
+  /* AJUSTE: ponteiros para os handles ADC REAIS (adc.c). ADC4 nao existe
+   * neste projeto -> fica NULL e nunca e iniciado (o mapeamento nao o usa). */
+  ADC_HandleTypeDef *pAdcHandle[LINESENSORS_ADC_COUNT];
 
-  xLineSensorsAttributes.pBuffer[0] = &xLineSensorsAttributes.usBuffer124[0];
-  xLineSensorsAttributes.pBuffer[1] = &xLineSensorsAttributes.usBuffer124[1];
-  xLineSensorsAttributes.pBuffer[2] = &xLineSensorsAttributes.usBuffer3;
-  xLineSensorsAttributes.pBuffer[3] = &xLineSensorsAttributes.usBuffer124[2];
-  xLineSensorsAttributes.pBuffer[4] = &xLineSensorsAttributes.usBuffer5;
+  pAdcBuffer[LINESENSORS_ADC_1] = xLineSensorsAttributes.usBufferAdc1;
+  pAdcBuffer[LINESENSORS_ADC_2] = xLineSensorsAttributes.usBufferAdc2;
+  pAdcBuffer[LINESENSORS_ADC_3] = xLineSensorsAttributes.usBufferAdc3;
+  pAdcBuffer[LINESENSORS_ADC_4] = xLineSensorsAttributes.usBufferAdc4;
+  pAdcBuffer[LINESENSORS_ADC_5] = xLineSensorsAttributes.usBufferAdc5;
 
-  vLineSensorsSetInterpolationWeigths(-0.5f, -1.0f, 0.0f, 1.0f, 0.5f);
-  vLineSensorsResetCalibration();
+  pAdcHandle[LINESENSORS_ADC_1] = &hadc1;
+  pAdcHandle[LINESENSORS_ADC_2] = &hadc2;
+  pAdcHandle[LINESENSORS_ADC_3] = &hadc3;
+  pAdcHandle[LINESENSORS_ADC_4] = NULL;   /* ADC4 nao configurado no projeto */
+  pAdcHandle[LINESENSORS_ADC_5] = &hadc5;
+
+  xConfig[LINESENSORS_SENSOR_LEFT].xAdc = xLeftAdc;
+  xConfig[LINESENSORS_SENSOR_LEFT].xRank = xLeftRank;
+
+  xConfig[LINESENSORS_SENSOR_CENTERLEFT].xAdc = xCenterLeftAdc;
+  xConfig[LINESENSORS_SENSOR_CENTERLEFT].xRank = xCenterLeftRank;
+
+  xConfig[LINESENSORS_SENSOR_CENTER].xAdc = xCenterAdc;
+  xConfig[LINESENSORS_SENSOR_CENTER].xRank = xCenterRank;
+
+  xConfig[LINESENSORS_SENSOR_CENTERRIGHT].xAdc = xCenterRightAdc;
+  xConfig[LINESENSORS_SENSOR_CENTERRIGHT].xRank = xCenterRightRank;
+
+  xConfig[LINESENSORS_SENSOR_RIGHT].xAdc = xRightAdc;
+  xConfig[LINESENSORS_SENSOR_RIGHT].xRank = xRightRank;
+
+  for (ucIndex = 0U; ucIndex < LINESENSORS_SENSOR_COUNT; ucIndex++)
+  {
+    ucAdcCount[xConfig[ucIndex].xAdc]++;
+  }
+
+  for (ucIndex = 0U; ucIndex < LINESENSORS_SENSOR_COUNT; ucIndex++)
+  {
+    xLineSensorsAttributes.pBuffer[ucIndex] =
+      &pAdcBuffer[xConfig[ucIndex].xAdc][xConfig[ucIndex].xRank];
+  }
+
+  for (ucIndex = 0U; ucIndex < LINESENSORS_ADC_COUNT; ucIndex++)
+  {
+    if ((0U != ucAdcCount[ucIndex]) && (NULL != pAdcHandle[ucIndex]))
+    {
+      HAL_ADC_Start_DMA(pAdcHandle[ucIndex],
+                        (uint32_t *)pAdcBuffer[ucIndex],
+                        ucAdcCount[ucIndex]);
+    }
+  }
+
+  vLineSensors_v2_SetInterpolationWeigths(-0.5f, -1.0f, 0.0f, 1.0f, 0.5f);
+  vLineSensors_v2_ResetCalibration();
 }
 
-/**
- * @brief Resets the calibration limits of all line sensors.
- *
- * Initializes the maximum and minimum values used during the
- * calibration process.
- */
-void vLineSensorsResetCalibration(void)
+void vLineSensors_v2_ResetCalibration(void)
 {
   unsigned int uiIndex;
 
@@ -75,13 +123,7 @@ void vLineSensorsResetCalibration(void)
   }
 }
 
-/**
- * @brief Updates the calibration limits using the current ADC readings.
- *
- * Compares the current sensor readings with the stored calibration
- * limits and updates the maximum and minimum values when necessary.
- */
-void vLineSensorsUpdateCalibration(void)
+void vLineSensors_v2_UpdateCalibration(void)
 {
   unsigned int uiIndex;
 
@@ -103,19 +145,19 @@ void vLineSensorsUpdateCalibration(void)
   }
 }
 
-/**
- * @brief Returns the normalized value of a selected line sensor.
- *
- * @param xSensor Selected sensor identifier.
- * @return Normalized sensor value in the range from 0.0 to 1.0.
- */
-float fLineSensorsGetSensorValue(lineSensorsEnum_t xSensor)
+float fLineSensors_v2_GetSensorValue(lineSensorsEnum_t xSensor)
 {
   float fRange;
   float fValue;
 
   fRange = (float)(xLineSensorsAttributes.usMax[xSensor] -
     xLineSensorsAttributes.usMin[xSensor]);
+
+  if (0.0f == fRange)
+  {
+    return 0.0f;   /* evita divisao por zero se max==min */
+  }
+
   fValue = ((float)(*xLineSensorsAttributes.pBuffer[xSensor]) -
     (float)xLineSensorsAttributes.usMin[xSensor]) / fRange;
 
@@ -132,16 +174,7 @@ float fLineSensorsGetSensorValue(lineSensorsEnum_t xSensor)
   return fValue;
 }
 
-/**
- * @brief Sets the interpolation weights used by the line sensors.
- *
- * @param fLeftWeigth Weight assigned to the left sensor.
- * @param fCenterLeftWeigth Weight assigned to the center-left sensor.
- * @param fCenterWeigth Weight assigned to the center sensor.
- * @param fCenterRightWeigth Weight assigned to the center-right sensor.
- * @param fRightWeigth Weight assigned to the right sensor.
- */
-void vLineSensorsSetInterpolationWeigths(float fLeftWeigth,
+void vLineSensors_v2_SetInterpolationWeigths(float fLeftWeigth,
   float fCenterLeftWeigth,
   float fCenterWeigth,
   float fCenterRightWeigth,
@@ -154,12 +187,7 @@ void vLineSensorsSetInterpolationWeigths(float fLeftWeigth,
   xLineSensorsAttributes.fWeigths[4] = fRightWeigth;
 }
 
-/**
- * @brief Returns the interpolated value calculated from all sensors.
- *
- * @return Interpolated line position based on the configured weights.
- */
-float fLineSensorsGetInterpolatedValue(void)
+float fLineSensors_v2_GetInterpolatedValue(void)
 {
   float fNegMax;
   float fPosMax;
@@ -181,39 +209,9 @@ float fLineSensorsGetInterpolatedValue(void)
       fNegMax -= xLineSensorsAttributes.fWeigths[uiIndex];
     }
 
-    fValue += fLineSensorsGetSensorValue((lineSensorsEnum_t)uiIndex) *
+    fValue += fLineSensors_v2_GetSensorValue((lineSensorsEnum_t)uiIndex) *
       xLineSensorsAttributes.fWeigths[uiIndex];
   }
 
   return (0.0f < fValue) ? (fValue / fPosMax) : (fValue / fNegMax);
 }
-
-// Funções de acesso público para os valores crus, máximos e mínimos dos sensores
-float fLineSensorGetRawValue(lineSensorsEnum_t xSensor)
-{
-    if ((uint8_t)xSensor < LINESENSORS_SENSOR_COUNT)
-    {
-        return *xLineSensorsAttributes.pBuffer[(uint8_t)xSensor];
-    }
-    return 0;
-}
-
-float fLineSensorGetMax(lineSensorsEnum_t xSensor)
-{
-    if ((uint8_t)xSensor < LINESENSORS_SENSOR_COUNT)
-    {
-        return xLineSensorsAttributes.usMax[(uint8_t)xSensor];
-    }
-    return 0;
-}
-
-float fLineSensorGetMin(lineSensorsEnum_t xSensor)
-{
-    if ((uint8_t)xSensor < LINESENSORS_SENSOR_COUNT)
-    {
-        return xLineSensorsAttributes.usMin[(uint8_t)xSensor];
-    }
-    return 0;
-}
-
-#endif // LINESENSORS_C
