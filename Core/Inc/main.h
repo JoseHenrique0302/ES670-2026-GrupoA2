@@ -75,6 +75,10 @@ void Error_Handler(void);
 #define BT_Enter_Pin GPIO_PIN_5
 #define BT_Enter_GPIO_Port GPIOC
 #define BT_Enter_EXTI_IRQn EXTI9_5_IRQn
+#define HC05_TX_Pin GPIO_PIN_10
+#define HC05_TX_GPIO_Port GPIOB
+#define HC05_RX_Pin GPIO_PIN_11
+#define HC05_RX_GPIO_Port GPIOB
 #define Motor_Dir_IN1_Pin GPIO_PIN_12
 #define Motor_Dir_IN1_GPIO_Port GPIOB
 #define BT_Baixo_Pin GPIO_PIN_7

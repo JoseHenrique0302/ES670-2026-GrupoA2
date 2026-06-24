@@ -22,7 +22,6 @@
 #include "task.h"
 #include "main.h"
 #include "cmsis_os.h"
-#include <math.h>
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
@@ -225,14 +224,14 @@ osThreadId_t vTaskOdometriaHandle;
 const osThreadAttr_t vTaskOdometria_attributes = {
   .name = "vTaskOdometria",
   .priority = (osPriority_t) osPriorityNormal,
-  .stack_size = 512 * 4   /* snprintf com float (-u_printf_float) precisa de >1KB */
+  .stack_size = 256 * 4
 };
 /* Definitions for vTaskUART */
 osThreadId_t vTaskUARTHandle;
 const osThreadAttr_t vTaskUART_attributes = {
   .name = "vTaskUART",
   .priority = (osPriority_t) osPriorityBelowNormal4,
-  .stack_size = 512 * 4   /* txBuffer[256] + snprintf/sscanf com float -> >1.5KB */
+  .stack_size = 256 * 4
 };
 /* Definitions for vTaskLCD */
 osThreadId_t vTaskLCDHandle;
