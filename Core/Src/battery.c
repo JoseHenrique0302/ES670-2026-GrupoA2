@@ -25,7 +25,7 @@ typedef struct {
   uint8_t soc;
 } batteryTable_t;
 
-#define ADC_MAX 8.2f
+#define ADC_MAX 4095.0f
 #define VREF 3.3f
 #define BATTERY_GAIN 2.49f
 

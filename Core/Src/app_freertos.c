@@ -1217,10 +1217,12 @@ void HAL_TIM_IC_CaptureCallback(TIM_HandleTypeDef *htim)
     if (htim->Instance == TIM16)        // I3: encoder roda esquerda (Encoder_Esq_TIM / PB4)
     {
         gvEncoderCounts[0]++;           // escrita de 32 bits é atômica no Cortex-M4
+        vMotorEncoderHandleTimerCapture(MOTORENCODER_MOTOR_RIGHT);
     }
     else if (htim->Instance == TIM17)   // I4: encoder roda direita (Encoder_Dir_TIM / PB5)
     {
         gvEncoderCounts[1]++;
+        vMotorEncoderHandleTimerCapture(MOTORENCODER_MOTOR_LEFT);
     }
     else if (htim->Instance == TIM3)    // I6: eco do HC-SR04 (echo capture)
     {
@@ -1228,6 +1230,8 @@ void HAL_TIM_IC_CaptureCallback(TIM_HandleTypeDef *htim)
         // por semáforo (modelo I6), grave aqui g_ultrasonicEchoTicks e libere:
         //   osSemaphoreRelease(semUltrassonicHandle);
     }
+
+    // ↑ Se faltar, velocidade e distância ficam sempre 0
 }
 
 /**
