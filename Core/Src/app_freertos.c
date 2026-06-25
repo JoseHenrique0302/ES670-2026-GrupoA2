@@ -32,6 +32,7 @@
 #include "distanceSensor.h"
 #include "lcd_hd44780_i2c.h"
 #include "buttons.h"
+#include "usart.h"
 #include "string.h"
 #include "stdio.h"
 #include <math.h>
@@ -134,8 +135,9 @@ typedef struct {
 // Outros defines
 #define MAX_ENCODER_COUNTS      1000000UL
 #define MIN_BATTERY_VOLTAGE_MV  5500   // 5.5V (legado, não usado)
-#define BATTERY_MIN_PCT         10U    // emergência se carga < 10%
+//#define BATTERY_MIN_PCT         10U    // emergência se carga < 10%
 #define STOP_DISTANCE_CM        5.0f
+
 
 /* USER CODE END PTD */
 
@@ -168,6 +170,7 @@ extern I2C_HandleTypeDef hi2c2;
 // Handles dos timers e UART (gerados pelo CubeMX)
 extern TIM_HandleTypeDef htim1, htim8, htim16, htim17, htim20, htim3, htim7;
 extern UART_HandleTypeDef hlpuart1;
+extern UART_HandleTypeDef huart3;
 
 // Modo atual do sistema (escrito por vTaskTrocarModo, lido por vTaskSegueLinha).
 // 1 byte -> escrita/leitura atômica no Cortex-M4; dispensa mutex.
@@ -180,6 +183,13 @@ static uint8_t  gucBtRxRing[BT_RX_RING_SIZE];
 static volatile uint16_t gusBtRxHead = 0;
 static volatile uint16_t gusBtRxTail = 0;
 static uint8_t  gucBtRxByte = 0;   // destino do HAL_UART_Receive_IT
+
+// Buffer circular para a USART3 (Bluetooth)
+#define BT3_RX_RING_SIZE 128U
+static uint8_t  gucBt3RxRing[BT3_RX_RING_SIZE];
+static volatile uint16_t gusBt3RxHead = 0;
+static volatile uint16_t gusBt3RxTail = 0;
+static uint8_t  gucBt3RxByte = 0;   // destino do HAL_UART_Receive_IT para USART3
 
 // Definição dos pinos dos motores (conforme gpio.c)
 #define MOTOR_DIR_IN1_Pin   Motor_Dir_IN1_Pin
@@ -382,6 +392,7 @@ void MX_FREERTOS_Init(void) {
 
     // Buzzer no TIM8_CH1 (PA15): inicia o PWM com duty 0 (silencioso)
     HAL_TIM_PWM_Start(&htim8, TIM_CHANNEL_1);
+    HAL_TIM_Base_Start_IT(&htim7);
     __HAL_TIM_SET_COMPARE(&htim8, TIM_CHANNEL_1, 0);
 
     // Botões (debounce por software usando o TIM7). Ordem: Up, Right, Left, Down, Enter
@@ -430,6 +441,8 @@ void MX_FREERTOS_Init(void) {
   /* Arma a recepção da UART por interrupção (1 byte por vez) somente após o
    * semáforo semBTRxReady existir -> ISR I2 (HAL_UART_RxCpltCallback). */
   HAL_UART_Receive_IT(&hlpuart1, &gucBtRxByte, 1);
+  // Inicializa a recepção da USART3 (Bluetooth)
+  HAL_UART_Receive_IT(&huart3, &gucBt3RxByte, 1);
   /* USER CODE END RTOS_SEMAPHORES */
 
   /* USER CODE BEGIN RTOS_TIMERS */
@@ -679,8 +692,8 @@ void vStartTaskSegueLinha(void *argument)
 	        // comparava com 5500mV -> a condição era SEMPRE verdadeira, a emergência
 	        // ligava no 1º ciclo e os motores NUNCA rodavam. O guard usBatteryRaw>100
 	        // evita falso disparo no boot, antes do ADC/DMA converter (leitura ~0).
-	        if (usBatteryRaw > 100U && ucBatteryPct < BATTERY_MIN_PCT)
-	            osEventFlagsSet(evEmergencyHandle, EMERGENCY_BIT);
+//	        if (usBatteryRaw > 100U && ucBatteryPct < BATTERY_MIN_PCT)
+//	            osEventFlagsSet(evEmergencyHandle, EMERGENCY_BIT);
 
 	        /* ---- 3) Controle de linha: só no modo AUTÔNOMO ---- */
 	        if (gvSystemMode != MODE_AUTONOMOUS)
@@ -747,13 +760,89 @@ void vStartTaskSegueLinha(void *argument)
 void vStartTaskOdometria(void *argument)
 {
   /* USER CODE BEGIN vStartTaskOdometria */
+    (void)argument;
+
+    const TickType_t xPeriod = pdMS_TO_TICKS(TASK_PERIOD_ODOMETRY); // 50 ms
+    TickType_t xLastWakeTime = xTaskGetTickCount();
+
+    static float fLastLeftCount = 0.0f, fLastRightCount = 0.0f;
+
+    // Parâmetros geométricos do robô (em metros)
+    const float WHEEL_RADIUS = 0.0315f;        // raio da roda (diâmetro 63 mm / 2)
+    const float HALF_WHEEL_BASE = 0.0665f;     // E = distância entre rodas / 2 (133 mm / 2)
+    const float PPR = 20.0f;                   // pulsos por revolução (x1)
+    const float METERS_PER_TICK = (2.0f * 3.1415926535897932f * WHEEL_RADIUS) / PPR;
+
+    // Variáveis para média de velocidade
+    static float fSpeedSum = 0.0f;
+    static int speedCount = 0;
+
+    // Buffers para o LCD
+    char lcdLine1[17], lcdLine2[17];
+    uint8_t lcdBuffer[32];
+
   /* Infinite loop */
   for(;;)
   {
-    osDelay(1);
+      vTaskDelayUntil(&xLastWakeTime, xPeriod);
+
+      // 1. Leitura atômica dos contadores dos encoders
+      int32_t leftCount, rightCount;
+      taskENTER_CRITICAL();
+      leftCount = gvEncoderCounts[0];
+      rightCount = gvEncoderCounts[1];
+      taskEXIT_CRITICAL();
+
+      // 2. Incrementos em metros para cada roda
+      float fDeltaLeft  = (leftCount  - fLastLeftCount)  * METERS_PER_TICK;
+      float fDeltaRight = (rightCount - fLastRightCount) * METERS_PER_TICK;
+      fLastLeftCount  = leftCount;
+      fLastRightCount = rightCount;
+      // 3. Cinemática diferencial
+      float fDeltaDist  = (fDeltaLeft + fDeltaRight) * 0.5f;
+      float fDeltaTheta = (fDeltaRight - fDeltaLeft) / (2.0f * HALF_WHEEL_BASE);
+
+      // 4. Atualização da pose
+      if (osMutexAcquire(mutexTelemetryHandle, pdMS_TO_TICKS(5)) == osOK)
+      {
+          const float PI = 3.1415926535897932f;
+          float theta_mid = gvTelemetry.theta + fDeltaTheta * 0.5f;
+
+          gvTelemetry.posX += fDeltaDist * cosf(theta_mid);
+          gvTelemetry.posY += fDeltaDist * sinf(theta_mid);
+          gvTelemetry.theta += fDeltaTheta;
+
+          if (gvTelemetry.theta >  PI) gvTelemetry.theta -= 2.0f * PI;
+          if (gvTelemetry.theta < -PI) gvTelemetry.theta += 2.0f * PI;
+
+          float dt = TASK_PERIOD_ODOMETRY / 1000.0f;
+          float fSpeed = fDeltaDist / dt;
+          gvTelemetry.speedCurrent = fSpeed;
+          gvTelemetry.distTotal += fabsf(fDeltaDist);
+
+          fSpeedSum += fSpeed;
+          speedCount++;
+          if (speedCount >= 20)
+          {
+              gvTelemetry.speedAverage = fSpeedSum / speedCount;
+              fSpeedSum = 0.0f;
+              speedCount = 0;
+          }
+
+          osMutexRelease(mutexTelemetryHandle);
+      }
+
+      // 5. Envia dados para o LCD (via fila)
+      snprintf(lcdLine1, 17, "X:%5.2f Y:%5.2f", gvTelemetry.posX, gvTelemetry.posY);
+      snprintf(lcdLine2, 17, "Th:%5.2f V:%4.2f", gvTelemetry.theta, gvTelemetry.speedCurrent);
+      memcpy(lcdBuffer, lcdLine1, 16);
+      memcpy(lcdBuffer + 16, lcdLine2, 16);
+      osMessageQueuePut(qLCDDataHandle, lcdBuffer, 0, 0);
   }
-  /* USER CODE END vStartTaskOdometria */
 }
+
+
+  /* USER CODE END vStartTaskOdometria */
 
 /* USER CODE BEGIN Header_vStartTaskUART */
 /**
@@ -765,90 +854,104 @@ void vStartTaskOdometria(void *argument)
 void vStartTaskUART(void *argument)
 {
   /* USER CODE BEGIN vStartTaskUART */
+    (void)argument;
+    uint8_t ucRxByte;
+    static uint8_t rxBuffer[64];
+    static uint8_t rxIndex = 0;
+    TelemetryData_t telemetrySnap;
+    char txBuffer[256];
+    const TickType_t xTelemetryPeriod = pdMS_TO_TICKS(1000);
+    TickType_t xLastTelemetryTime = xTaskGetTickCount();
+
+    // Função interna para processar um byte recebido e montar comandos
+    void processByte(uint8_t byte)
+    {
+        if (byte == '\n' || byte == '\r')
+        {
+            rxBuffer[rxIndex] = '\0';
+            // Processa comando (exatamente como antes)
+            if (strcmp((char*)rxBuffer, "CALIBRATE") == 0)
+                vTaskResume(vTaskCalibracaoHandle);
+            else if (strncmp((char*)rxBuffer, "SET_PID ", 8) == 0)
+            {
+                float kp, ki, kd;
+                sscanf((char*)rxBuffer+8, "%f %f %f", &kp, &ki, &kd);
+                if (osMutexAcquire(mutexPIDParamsHandle, pdMS_TO_TICKS(5)) == osOK)
+                {
+                    gvPIDParams.fKp = kp;
+                    gvPIDParams.fKi = ki;
+                    gvPIDParams.fKd = kd;
+                    osMutexRelease(mutexPIDParamsHandle);
+                }
+            }
+            else if (strcmp((char*)rxBuffer, "GET_PID") == 0)
+            {
+                float kp, ki, kd;
+                if (osMutexAcquire(mutexPIDParamsHandle, pdMS_TO_TICKS(5)) == osOK)
+                {
+                    kp = gvPIDParams.fKp;
+                    ki = gvPIDParams.fKi;
+                    kd = gvPIDParams.fKd;
+                    osMutexRelease(mutexPIDParamsHandle);
+                }
+                snprintf(txBuffer, sizeof(txBuffer), "PID:%.2f %.2f %.2f\r\n", kp, ki, kd);
+                HAL_UART_Transmit(&huart3, (uint8_t*)txBuffer, strlen(txBuffer), 100);
+            }
+            else if (strcmp((char*)rxBuffer, "MANUAL") == 0)
+            {
+                uint8_t mode = MODE_MANUAL;
+                osMessageQueuePut(qTrocaModoHandle, &mode, 0, 0);
+            }
+            else if (strcmp((char*)rxBuffer, "AUTO") == 0)
+            {
+                uint8_t mode = MODE_AUTONOMOUS;
+                osMessageQueuePut(qTrocaModoHandle, &mode, 0, 0);
+            }
+            else if (strncmp((char*)rxBuffer, "MOTOR ", 6) == 0)
+            {
+                float left, right;
+                sscanf((char*)rxBuffer+6, "%f %f", &left, &right);
+                MotorCommand_t cmd = {left, right, 2}; // MANUAL
+                osMessageQueuePut(qMotorCommandHandle, &cmd, 0, 0);
+            }
+            else if (strcmp((char*)rxBuffer, "STOP") == 0)
+            {
+                MotorCommand_t cmd = {0,0,0};
+                osMessageQueuePut(qMotorCommandHandle, &cmd, 0, 0);
+            }
+            rxIndex = 0;
+        }
+        else if (rxIndex < sizeof(rxBuffer)-1)
+        {
+            rxBuffer[rxIndex++] = byte;
+        }
+    }
+
   /* Infinite loop */
-	    (void)argument;
-	    uint8_t ucRxByte;
-	    static uint8_t rxBuffer[64];
-	    static uint8_t rxIndex = 0;
-	    TelemetryData_t telemetrySnap;
-	    char txBuffer[256];
-	    const TickType_t xTelemetryPeriod = pdMS_TO_TICKS(1000);
-	    TickType_t xLastTelemetryTime = xTaskGetTickCount();
+
 
 	    for(;;)
 	    {
-	        // Aguarda o sinal da ISR (I2) indicando byte(s) recebido(s)
+	        // Aguarda dados de qualquer UART
 	        if (osSemaphoreAcquire(semBTRxReadyHandle, pdMS_TO_TICKS(100)) == osOK)
 	        {
-	          // Drena todos os bytes disponíveis no buffer circular preenchido pela ISR
-	          while (gusBtRxTail != gusBtRxHead)
-	          {
-	            ucRxByte = gucBtRxRing[gusBtRxTail];
-	            gusBtRxTail = (uint16_t)((gusBtRxTail + 1U) % BT_RX_RING_SIZE);
-
-	            if (ucRxByte == '\n' || ucRxByte == '\r')
+	            // Drena bytes da LPUART1
+	            while (gusBtRxTail != gusBtRxHead)
 	            {
-	                rxBuffer[rxIndex] = '\0';
-	                // Processa comando
-	                if (strcmp((char*)rxBuffer, "CALIBRATE") == 0)
-	                    vTaskResume(vTaskCalibracaoHandle);
-	                else if (strncmp((char*)rxBuffer, "SET_PID ", 8) == 0)
-	                {
-	                    float kp, ki, kd;
-	                    sscanf((char*)rxBuffer+8, "%f %f %f", &kp, &ki, &kd);
-	                    if (osMutexAcquire(mutexPIDParamsHandle, pdMS_TO_TICKS(5)) == osOK)
-	                    {
-	                        gvPIDParams.fKp = kp;
-	                        gvPIDParams.fKi = ki;
-	                        gvPIDParams.fKd = kd;
-	                        osMutexRelease(mutexPIDParamsHandle);
-	                    }
-	                }
-	                else if (strcmp((char*)rxBuffer, "GET_PID") == 0)
-	                {
-	                    float kp, ki, kd;
-	                    if (osMutexAcquire(mutexPIDParamsHandle, pdMS_TO_TICKS(5)) == osOK)
-	                    {
-	                        kp = gvPIDParams.fKp;
-	                        ki = gvPIDParams.fKi;
-	                        kd = gvPIDParams.fKd;
-	                        osMutexRelease(mutexPIDParamsHandle);
-	                    }
-	                    snprintf(txBuffer, sizeof(txBuffer), "PID:%.2f %.2f %.2f\r\n", kp, ki, kd);
-	                    HAL_UART_Transmit(&hlpuart1, (uint8_t*)txBuffer, strlen(txBuffer), 100);
-	                }
-	                else if (strcmp((char*)rxBuffer, "MANUAL") == 0)
-	                {
-	                    uint8_t mode = MODE_MANUAL;
-	                    osMessageQueuePut(qTrocaModoHandle, &mode, 0, 0);
-	                }
-	                else if (strcmp((char*)rxBuffer, "AUTO") == 0)
-	                {
-	                    uint8_t mode = MODE_AUTONOMOUS;
-	                    osMessageQueuePut(qTrocaModoHandle, &mode, 0, 0);
-	                }
-	                else if (strncmp((char*)rxBuffer, "MOTOR ", 6) == 0)
-	                {
-	                    float left, right;
-	                    sscanf((char*)rxBuffer+6, "%f %f", &left, &right);
-	                    MotorCommand_t cmd = {left, right, 2}; // MANUAL
-	                    osMessageQueuePut(qMotorCommandHandle, &cmd, 0, 0);
-	                }
-	                else if (strcmp((char*)rxBuffer, "STOP") == 0)
-	                {
-	                    MotorCommand_t cmd = {0,0,0};
-	                    osMessageQueuePut(qMotorCommandHandle, &cmd, 0, 0);
-	                }
-	                rxIndex = 0;
+	                ucRxByte = gucBtRxRing[gusBtRxTail];
+	                gusBtRxTail = (uint16_t)((gusBtRxTail + 1U) % BT_RX_RING_SIZE);
+	                processByte(ucRxByte);
 	            }
-	            else if (rxIndex < sizeof(rxBuffer)-1)
+	            // Drena bytes da USART3
+	            while (gusBt3RxTail != gusBt3RxHead)
 	            {
-	                rxBuffer[rxIndex++] = ucRxByte;
+	                ucRxByte = gucBt3RxRing[gusBt3RxTail];
+	                gusBt3RxTail = (uint16_t)((gusBt3RxTail + 1U) % BT3_RX_RING_SIZE);
+	                processByte(ucRxByte);
 	            }
-	          } // while: drena buffer circular
 	        }
 
-	        // Envia telemetria a cada 1 segundo
+	        // Envia telemetria a cada 1 segundo pela USART3
 	        if ((xTaskGetTickCount() - xLastTelemetryTime) >= xTelemetryPeriod)
 	        {
 	            xLastTelemetryTime = xTaskGetTickCount();
@@ -862,7 +965,7 @@ void vStartTaskUART(void *argument)
 	                telemetrySnap.posX, telemetrySnap.posY, telemetrySnap.theta,
 	                telemetrySnap.speedCurrent, telemetrySnap.speedAverage, telemetrySnap.distTotal,
 	                telemetrySnap.batteryPct, telemetrySnap.systemMode, telemetrySnap.calibDone);
-	            HAL_UART_Transmit(&hlpuart1, (uint8_t*)txBuffer, strlen(txBuffer), 100);
+	            HAL_UART_Transmit(&huart3, (uint8_t*)txBuffer, strlen(txBuffer), 100);
 	        }
 	    }
 
@@ -1132,16 +1235,16 @@ void HAL_TIM_IC_CaptureCallback(TIM_HandleTypeDef *htim)
  */
 void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
 {
-    /* I1 - bumper frontal: parada de emergência (<10 ms).
-     * Requer configurar PD2 (Switch_Fr) como EXTI na IOC. Quando existir:
-     *   if (GPIO_Pin == Switch_Fr_Pin) {
-     *       osEventFlagsSet(evEmergencyHandle, EMERGENCY_BIT);
-     *       return;
-     *   }
-     */
+    //I1 - bumper frontal: parada de emergência (<10 ms).
+     //Requer configurar PD2 (Switch_Fr) como EXTI na IOC. Quando existir:
+     if (GPIO_Pin == Switch_Fr_Pin) {
+     	 osEventFlagsSet(evEmergencyHandle, EMERGENCY_BIT);
+     	 return;
+     }
 
     /* I5 - botões: inicia o debounce (buttons.c cuida da validação no TIM7) */
     vButtonsDebouncingStart(GPIO_Pin);
+
 }
 
 /**
@@ -1155,6 +1258,13 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
         gusBtRxHead = (uint16_t)((gusBtRxHead + 1U) % BT_RX_RING_SIZE);
         osSemaphoreRelease(semBTRxReadyHandle);   // conta 1 byte disponível
         HAL_UART_Receive_IT(huart, &gucBtRxByte, 1); // re-arma a próxima recepção
+    }
+    else if (huart->Instance == USART3)
+    {
+        gucBt3RxRing[gusBt3RxHead] = gucBt3RxByte;
+        gusBt3RxHead = (uint16_t)((gusBt3RxHead + 1U) % BT3_RX_RING_SIZE);
+        osSemaphoreRelease(semBTRxReadyHandle);  // mesmo semáforo pode ser usado
+        HAL_UART_Receive_IT(huart, &gucBt3RxByte, 1);
     }
 }
 
