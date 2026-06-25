@@ -148,6 +148,12 @@ typedef struct {
 // alarme falso (pino de eco flutuando lê <5cm -> zona de STOP -> freq. máxima)
 // enquanto focamos no seguir-linha. Para REABILITAR no futuro: trocar para 1.
 #define ULTRASONIC_BUZZER_ENABLED   0
+
+// Bumper frontal (PD2/Switch_Fr) como parada de emergência. Em 0, o EXTI do PD2
+// NÃO seta a emergência — evita TRAVAR o robô se o PD2 estiver flutuando/sem pull
+// (a emergência nunca é limpa e congela o vTaskMotor). Religar (1) só após pôr
+// pull-up/down no PD2 na IOC e validar a chave.
+#define BUMPER_EMERGENCY_ENABLED    0
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -392,7 +398,8 @@ void MX_FREERTOS_Init(void) {
 
     // Buzzer no TIM8_CH1 (PA15): inicia o PWM com duty 0 (silencioso)
     HAL_TIM_PWM_Start(&htim8, TIM_CHANNEL_1);
-    HAL_TIM_Base_Start_IT(&htim7);
+    // (removido o HAL_TIM_Base_Start_IT(&htim7): o buttons.c já dá start/stop do
+    //  TIM7 a cada debounce; deixá-lo livre desde o boot atrapalhava os botões.)
     __HAL_TIM_SET_COMPARE(&htim8, TIM_CHANNEL_1, 0);
 
     // Botões (debounce por software usando o TIM7). Ordem: Up, Right, Left, Down, Enter
@@ -1217,12 +1224,13 @@ void HAL_TIM_IC_CaptureCallback(TIM_HandleTypeDef *htim)
     if (htim->Instance == TIM16)        // I3: encoder roda esquerda (Encoder_Esq_TIM / PB4)
     {
         gvEncoderCounts[0]++;           // escrita de 32 bits é atômica no Cortex-M4
-        vMotorEncoderHandleTimerCapture(MOTORENCODER_MOTOR_RIGHT);
+        // (removida a chamada vMotorEncoderHandleTimerCapture: fazia divisão float +
+        //  stop/start de timer DENTRO da ISR e estava com LEFT/RIGHT trocados. A
+        //  odometria usa gvEncoderCounts, não a velocidade do driver.)
     }
     else if (htim->Instance == TIM17)   // I4: encoder roda direita (Encoder_Dir_TIM / PB5)
     {
         gvEncoderCounts[1]++;
-        vMotorEncoderHandleTimerCapture(MOTORENCODER_MOTOR_LEFT);
     }
     else if (htim->Instance == TIM3)    // I6: eco do HC-SR04 (echo capture)
     {
@@ -1239,12 +1247,15 @@ void HAL_TIM_IC_CaptureCallback(TIM_HandleTypeDef *htim)
  */
 void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
 {
-    //I1 - bumper frontal: parada de emergência (<10 ms).
-     //Requer configurar PD2 (Switch_Fr) como EXTI na IOC. Quando existir:
+    /* I1 - bumper frontal (PD2): parada de emergência. Guardado por
+     * BUMPER_EMERGENCY_ENABLED — desligado por padrão para não travar o robô com o
+     * PD2 flutuando (a emergência nunca é limpa -> vTaskMotor congela). */
+#if (BUMPER_EMERGENCY_ENABLED != 0)
      if (GPIO_Pin == Switch_Fr_Pin) {
-     	 osEventFlagsSet(evEmergencyHandle, EMERGENCY_BIT);
-     	 return;
+         osEventFlagsSet(evEmergencyHandle, EMERGENCY_BIT);
+         return;
      }
+#endif
 
     /* I5 - botões: inicia o debounce (buttons.c cuida da validação no TIM7) */
     vButtonsDebouncingStart(GPIO_Pin);
