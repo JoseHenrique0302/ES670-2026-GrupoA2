@@ -135,7 +135,7 @@ typedef struct {
 // Outros defines
 #define MAX_ENCODER_COUNTS      1000000UL
 #define MIN_BATTERY_VOLTAGE_MV  5500   // 5.5V (legado, não usado)
-//#define BATTERY_MIN_PCT         10U    // emergência se carga < 10%
+#define BATTERY_MIN_PCT         10U    // emergência se carga < 10%
 #define STOP_DISTANCE_CM        5.0f
 
 
@@ -165,7 +165,7 @@ typedef struct {
 //   3 BT  : "Th/V"              pose theta/velocidade        | bytes recebidos via BT
 // Use para testar TUDO: gire as rodas (pag0), passe a linha sob os IR (pag1),
 // aperte botoes (pag2), envie comando pelo app (pag3 BTrx sobe).
-#define DEBUG_LCD                   1
+#define ODOMETRY_LCD_RAW_DEBUG       1
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -244,56 +244,56 @@ osThreadId_t vTaskCalibracaoHandle;
 const osThreadAttr_t vTaskCalibracao_attributes = {
   .name = "vTaskCalibracao",
   .priority = (osPriority_t) osPriorityNormal,
-  .stack_size = 128 * 4
+  .stack_size = 512 * 4
 };
 /* Definitions for vTaskMotor */
 osThreadId_t vTaskMotorHandle;
 const osThreadAttr_t vTaskMotor_attributes = {
   .name = "vTaskMotor",
   .priority = (osPriority_t) osPriorityRealtime,
-  .stack_size = 128 * 4
+  .stack_size = 512 * 4
 };
 /* Definitions for vTaskSegueLinha */
 osThreadId_t vTaskSegueLinhaHandle;
 const osThreadAttr_t vTaskSegueLinha_attributes = {
   .name = "vTaskSegueLinha",
   .priority = (osPriority_t) osPriorityHigh,
-  .stack_size = 256 * 4
+  .stack_size = 512 * 4
 };
 /* Definitions for vTaskOdometria */
 osThreadId_t vTaskOdometriaHandle;
 const osThreadAttr_t vTaskOdometria_attributes = {
   .name = "vTaskOdometria",
   .priority = (osPriority_t) osPriorityNormal,
-  .stack_size = 256 * 4
+  .stack_size = 2048 * 4
 };
 /* Definitions for vTaskUART */
 osThreadId_t vTaskUARTHandle;
 const osThreadAttr_t vTaskUART_attributes = {
   .name = "vTaskUART",
   .priority = (osPriority_t) osPriorityBelowNormal4,
-  .stack_size = 256 * 4
+  .stack_size = 512 * 4
 };
 /* Definitions for vTaskLCD */
 osThreadId_t vTaskLCDHandle;
 const osThreadAttr_t vTaskLCD_attributes = {
   .name = "vTaskLCD",
   .priority = (osPriority_t) osPriorityLow,
-  .stack_size = 256 * 4
+  .stack_size = 512 * 4
 };
 /* Definitions for vTaskTrocarModo */
 osThreadId_t vTaskTrocarModoHandle;
 const osThreadAttr_t vTaskTrocarModo_attributes = {
   .name = "vTaskTrocarModo",
   .priority = (osPriority_t) osPriorityLow,
-  .stack_size = 128 * 4
+  .stack_size = 256 * 4
 };
 /* Definitions for vTaskUltraBuzz */
 osThreadId_t vTaskUltraBuzzHandle;
 const osThreadAttr_t vTaskUltraBuzz_attributes = {
   .name = "vTaskUltraBuzz",
   .priority = (osPriority_t) osPriorityAboveNormal,
-  .stack_size = 128 * 4
+  .stack_size = 1024 * 4
 };
 /* Definitions for qMotorCommand */
 osMessageQueueId_t qMotorCommandHandle;
@@ -873,45 +873,44 @@ void vStartTaskOdometria(void *argument)
       // 5. Envia dados para o LCD (via fila)
 #if (DEBUG_LCD != 0)
       // Painel de diagnostico: 4 paginas, troca MANUAL a cada aperto de botao
-      // (ver g_dbgLcdPage, incrementado em vButtonsPressedCallback).
-      uint8_t ucPage = g_dbgLcdPage;
-      switch (ucPage)
-      {
-          case 0: // ENCODERS (gire as rodas a mao: L/R devem subir) | pose X/Y
-              snprintf(lcdLine1, 17, "L%-6ld R%-6ld", (long)leftCount, (long)rightCount);
-              snprintf(lcdLine2, 17, "X:%4.1f Y:%4.1f", gvTelemetry.posX, gvTelemetry.posY);
-              break;
-          case 1: // SENSORES IR (binarizados) | bateria %% + ADC bruto
-              snprintf(lcdLine1, 17, "IR %u %u %u %u %u",
-                       g_dbgIR[0], g_dbgIR[1], g_dbgIR[2], g_dbgIR[3], g_dbgIR[4]);
-              snprintf(lcdLine2, 17, "Bat:%3u%% raw%4u",
-                       gvTelemetry.batteryPct, g_dbgBatRaw);
-              break;
-          case 2: // MODO/CALIBRACAO | ultimo botao (id) + total de apertos
-              snprintf(lcdLine1, 17, "Mode:%u Cal:%u",
-                       gvTelemetry.systemMode, gvTelemetry.calibDone);
-              snprintf(lcdLine2, 17, "Btn:%3u n:%4lu",
-                       g_dbgLastBtnId, (unsigned long)g_dbgBtnCount);
-              break;
-          default: // BLUETOOTH/pose | bytes recebidos via USART3 (sobe ao enviar do app)
-              snprintf(lcdLine1, 17, "Th:%5.2f V:%4.2f",
-                       gvTelemetry.theta, gvTelemetry.speedCurrent);
-              snprintf(lcdLine2, 17, "BTrx:%-9lu", (unsigned long)g_dbgBtRxCount);
-              break;
-      }
+//      // (ver g_dbgLcdPage, incrementado em vButtonsPressedCallback).
+//      uint8_t ucPage = g_dbgLcdPage;
+//      switch (ucPage)
+//      {
+//          case 0: // ENCODERS (gire as rodas a mao: L/R devem subir) | pose X/Y
+//              snprintf(lcdLine1, 17, "L%-6ld R%-6ld", (long)leftCount, (long)rightCount);
+//              snprintf(lcdLine2, 17, "X:%4.1f Y:%4.1f", gvTelemetry.posX, gvTelemetry.posY);
+//              break;
+//          case 1: // SENSORES IR (binarizados) | bateria %% + ADC bruto
+//              snprintf(lcdLine1, 17, "IR %u %u %u %u %u",
+//                       g_dbgIR[0], g_dbgIR[1], g_dbgIR[2], g_dbgIR[3], g_dbgIR[4]);
+//              snprintf(lcdLine2, 17, "Bat:%3u%% raw%4u",
+//                       gvTelemetry.batteryPct, g_dbgBatRaw);
+//              break;
+//          case 2: // MODO/CALIBRACAO | ultimo botao (id) + total de apertos
+//              snprintf(lcdLine1, 17, "Mode:%u Cal:%u",
+//                       gvTelemetry.systemMode, gvTelemetry.calibDone);
+//              snprintf(lcdLine2, 17, "Btn:%3u n:%4lu",
+//                       g_dbgLastBtnId, (unsigned long)g_dbgBtnCount);
+//              break;
+//          default: // BLUETOOTH/pose | bytes recebidos via USART3 (sobe ao enviar do app)
+//              snprintf(lcdLine1, 17, "Th:%5.2f V:%4.2f",
+//                       gvTelemetry.theta, gvTelemetry.speedCurrent);
+//              snprintf(lcdLine2, 17, "BTrx:%-9lu", (unsigned long)g_dbgBtRxCount);
+//              break;
+//     }
 #else
-      snprintf(lcdLine1, 17, "X:%5.2f Y:%5.2f", gvTelemetry.posX, gvTelemetry.posY);
-      snprintf(lcdLine2, 17, "Th:%5.2f V:%4.2f", gvTelemetry.theta, gvTelemetry.speedCurrent);
+      snprintf(lcdLine1, 17, "X:%4.1f Y:%4.1f", gvTelemetry.posX, gvTelemetry.posY);
+      snprintf(lcdLine2, 17, "Th:%4.1f V:%4.1f", gvTelemetry.theta, gvTelemetry.speedCurrent);
 #endif
       memcpy(lcdBuffer, lcdLine1, 16);
       memcpy(lcdBuffer + 16, lcdLine2, 16);
       osMessageQueuePut(qLCDDataHandle, lcdBuffer, 0, 0);
   }
-}
 
 
   /* USER CODE END vStartTaskOdometria */
-
+}
 
 /* USER CODE BEGIN Header_vStartTaskUART */
 /**
@@ -1302,19 +1301,16 @@ void HAL_TIM_IC_CaptureCallback(TIM_HandleTypeDef *htim)
  */
 void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
 {
-    /* I1 - bumper frontal (PD2): parada de emergência. Guardado por
-     * BUMPER_EMERGENCY_ENABLED — desligado por padrão para não travar o robô com o
-     * PD2 flutuando (a emergência nunca é limpa -> vTaskMotor congela). */
-//#if (BUMPER_EMERGENCY_ENABLED != 0)
-//     if (GPIO_Pin == Switch_Fr_Pin) {
-//         osEventFlagsSet(evEmergencyHandle, EMERGENCY_BIT);
-//         return;
-//     }
-//#endif
+    if (GPIO_Pin == Switch_Fr_Pin) {
+        // Verifica se o pino realmente está no estado ativo (ex: nível baixo)
+        if (HAL_GPIO_ReadPin(Switch_Fr_GPIO_Port, Switch_Fr_Pin) == GPIO_PIN_RESET) {
+        	HAL_GPIO_WritePin(LD2_GPIO_Port, LD2_Pin, 1);
+            osEventFlagsSet(evEmergencyHandle, EMERGENCY_BIT);
+        }
+        return;
+    }
 
-    /* I5 - botões: inicia o debounce (buttons.c cuida da validação no TIM7) */
     vButtonsDebouncingStart(GPIO_Pin);
-
 }
 
 /**
