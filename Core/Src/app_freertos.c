@@ -147,13 +147,13 @@ typedef struct {
 // sensor nem aciona o buzzer e o trigger (TIM20/TIM3) nem é iniciado — evita o
 // alarme falso (pino de eco flutuando lê <5cm -> zona de STOP -> freq. máxima)
 // enquanto focamos no seguir-linha. Para REABILITAR no futuro: trocar para 1.
-#define ULTRASONIC_BUZZER_ENABLED   0
+#define ULTRASONIC_BUZZER_ENABLED   1
 
 // Bumper frontal (PD2/Switch_Fr) como parada de emergência. Em 0, o EXTI do PD2
 // NÃO seta a emergência — evita TRAVAR o robô se o PD2 estiver flutuando/sem pull
 // (a emergência nunca é limpa e congela o vTaskMotor). Religar (1) só após pôr
 // pull-up/down no PD2 na IOC e validar a chave.
-#define BUMPER_EMERGENCY_ENABLED    0
+#define BUMPER_EMERGENCY_ENABLED    1
 
 // DEBUG no LCD: em 1, a task de odometria transforma o LCD num painel de
 // diagnostico que GIRA sozinho a cada ~2,5 s (sem precisar de botao/debugger),
@@ -879,7 +879,7 @@ void vStartTaskOdometria(void *argument)
       {
           case 0: // ENCODERS (gire as rodas a mao: L/R devem subir) | pose X/Y
               snprintf(lcdLine1, 17, "L%-6ld R%-6ld", (long)leftCount, (long)rightCount);
-              snprintf(lcdLine2, 17, "X:%5.2f Y:%5.2f", gvTelemetry.posX, gvTelemetry.posY);
+              snprintf(lcdLine2, 17, "X:%4.1f Y:%4.1f", gvTelemetry.posX, gvTelemetry.posY);
               break;
           case 1: // SENSORES IR (binarizados) | bateria %% + ADC bruto
               snprintf(lcdLine1, 17, "IR %u %u %u %u %u",
@@ -1305,12 +1305,12 @@ void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
     /* I1 - bumper frontal (PD2): parada de emergência. Guardado por
      * BUMPER_EMERGENCY_ENABLED — desligado por padrão para não travar o robô com o
      * PD2 flutuando (a emergência nunca é limpa -> vTaskMotor congela). */
-#if (BUMPER_EMERGENCY_ENABLED != 0)
-     if (GPIO_Pin == Switch_Fr_Pin) {
-         osEventFlagsSet(evEmergencyHandle, EMERGENCY_BIT);
-         return;
-     }
-#endif
+//#if (BUMPER_EMERGENCY_ENABLED != 0)
+//     if (GPIO_Pin == Switch_Fr_Pin) {
+//         osEventFlagsSet(evEmergencyHandle, EMERGENCY_BIT);
+//         return;
+//     }
+//#endif
 
     /* I5 - botões: inicia o debounce (buttons.c cuida da validação no TIM7) */
     vButtonsDebouncingStart(GPIO_Pin);
