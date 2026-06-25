@@ -1278,30 +1278,23 @@ void vStartTaskUltrassonicBuzzer(void *argument)
 /* ========================================================================== */
 
 /**
- * @brief Captura dos timers: encoders (I3/I4) e eco do ultrassônico (I6).
- * @note  Chamada pela HAL dentro do IRQ do timer correspondente.
- */
+	 * @brief Handles timer input capture events.
+	 * @details This callback is called by the HAL whenever an input capture
+	 * event occurs. It must forward the capture event to the motor encoder
+	 * module according to the timer that generated the callback.
+	 * @param htim Timer handle that generated the callback.
+	 */
 void HAL_TIM_IC_CaptureCallback(TIM_HandleTypeDef *htim)
 {
-    if (htim->Instance == TIM16)        // I3: encoder roda esquerda (Encoder_Esq_TIM / PB4)
-    {
-        gvEncoderCounts[0]++;           // escrita de 32 bits é atômica no Cortex-M4
-        // (removida a chamada vMotorEncoderHandleTimerCapture: fazia divisão float +
-        //  stop/start de timer DENTRO da ISR e estava com LEFT/RIGHT trocados. A
-        //  odometria usa gvEncoderCounts, não a velocidade do driver.)
-    }
-    else if (htim->Instance == TIM17)   // I4: encoder roda direita (Encoder_Dir_TIM / PB5)
-    {
-        gvEncoderCounts[1]++;
-    }
-    else if (htim->Instance == TIM3)    // I6: eco do HC-SR04 (echo capture)
-    {
-        // O driver distanceSensor.c captura via DMA. Quando migrar para a leitura
-        // por semáforo (modelo I6), grave aqui g_ultrasonicEchoTicks e libere:
-        //   osSemaphoreRelease(semUltrassonicHandle);
-    }
+	  if (&htim17 == htim) {
+	    vMotorEncoderHandleTimerCapture(MOTORENCODER_MOTOR_RIGHT);
+	    gvEncoderCounts[1]++;
 
-    // ↑ Se faltar, velocidade e distância ficam sempre 0
+	  } else if (&htim16 == htim) {
+	    vMotorEncoderHandleTimerCapture(MOTORENCODER_MOTOR_LEFT);
+	    gvEncoderCounts[0]++;
+	  }
+
 }
 
 /**
@@ -1352,24 +1345,47 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
 /*  Callbacks de botão (I5): chamados por vButtonsDebouncingStop (ISR TIM7)    */
 /*  postam o evento validado em qButtonsEvent (consumido por vTaskTrocarModo). */
 /* ========================================================================== */
+
+/**
+ * @brief Handles stable button press events.
+ * @details This callback is called by the buttons module after the
+ * debounce interval expires and a valid stable press is confirmed.
+ * It updates the motor setpoints according to the pressed button.
+ * @param xButton Button that was pressed.
+ */
 void vButtonsPressedCallback(buttonsEnum_t xButton)
 {
-    ButtonEvent_t xEvent = { (uint8_t)xButton, 0U }; // 0 = PRESS
-#if (DEBUG_LCD != 0)
-    g_dbgLastBtnId = (uint8_t)xButton;  // pagina SYS: 0=UP 1=DIR 2=ESQ 3=BAIXO 4=ENTER
-    g_dbgBtnCount++;
-    // Qualquer aperto valido avanca a pagina do painel (troca manual). O botao
-    // continua disparando sua acao normal de modo (mode/calibracao/teste motor)
-    // ao mesmo tempo, ja que vai para a fila qButtonsEvent como sempre.
-    g_dbgLcdPage = (uint8_t)((g_dbgLcdPage + 1U) % 4U);
-#endif
+    ButtonEvent_t xEvent = { (uint8_t)xButton, 0U }; // PRESS
     osMessageQueuePut(qButtonsEventHandle, &xEvent, 0, 0);
 }
 
 void vButtonsReleasedCallback(buttonsEnum_t xButton)
 {
-    ButtonEvent_t xEvent = { (uint8_t)xButton, 1U }; // 1 = RELEASE
+    ButtonEvent_t xEvent = { (uint8_t)xButton, 1U }; // RELEASE
     osMessageQueuePut(qButtonsEventHandle, &xEvent, 0, 0);
+}
+/**
+ * @brief Handles timer period elapsed events.
+ * @details This callback is called by the HAL whenever a timer update
+ * event occurs. It must forward the encoder timer overflow events to
+ * the motor encoder module, execute the motor control loop on TIM6, and
+ * stop the button debounce process when TIM7 expires.
+ * @param htim Timer handle that generated the callback.
+ */
+void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
+{
+    if (&htim17 == htim) {
+        vMotorEncoderHandleTimerReset(MOTORENCODER_MOTOR_RIGHT);
+    } else if (&htim16 == htim) {
+        vMotorEncoderHandleTimerReset(MOTORENCODER_MOTOR_LEFT);
+    } else if (&htim7 == htim) {
+        vButtonsDebouncingStop();
+    }
+    if (htim->Instance == TIM2) {
+        HAL_IncTick();
+        return;
+    }
+    // Remove todo o bloco do TIM6
 }
 
 /* USER CODE END Application */

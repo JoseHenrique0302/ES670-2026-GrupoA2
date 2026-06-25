@@ -8,7 +8,7 @@
  *
  * @author rodri
  * @date 19-Oct-2025
- * @version 1.2  // Incrementado para refletir a adição da distância
+ * @version 1.1
  */
 
 #include "motorEncoder.h"
@@ -37,10 +37,6 @@ typedef struct {
 static motorEncoderPeripherals_t xMotorEncoderPeripherals;
 static motorEncoderAttributes_t xMotorEncoderAttributes;
 
-// NOVO: variáveis estáticas para acumular a distância percorrida por cada roda (em cm)
-static float fRightDistance = 0.0f;
-static float fLeftDistance  = 0.0f;
-
 /**
  * @brief Sets the direction pins of one motor.
  *
@@ -56,20 +52,18 @@ static void vMotorEncoderSetDirection(motorEncoderMotor_t xMotor,
   switch (xMotor) {
     case MOTORENCODER_MOTOR_RIGHT:
       switch (xDirection) {
-        /* FORWARD/BACKWARD invertidos em relacao ao original para casar com a
-         * fiacao do motor (o robo andava reto para TRAS quando comandado frente). */
         case MOTORENCODER_DIRECTION_FORWARD:
-          HAL_GPIO_WritePin(xMotorEncoderPeripherals.pIn1Port,
-            xMotorEncoderPeripherals.usIn1Pin, GPIO_PIN_SET);
-          HAL_GPIO_WritePin(xMotorEncoderPeripherals.pIn2Port,
-            xMotorEncoderPeripherals.usIn2Pin, GPIO_PIN_RESET);
-          break;
-
-        case MOTORENCODER_DIRECTION_BACKWARD:
           HAL_GPIO_WritePin(xMotorEncoderPeripherals.pIn1Port,
             xMotorEncoderPeripherals.usIn1Pin, GPIO_PIN_RESET);
           HAL_GPIO_WritePin(xMotorEncoderPeripherals.pIn2Port,
             xMotorEncoderPeripherals.usIn2Pin, GPIO_PIN_SET);
+          break;
+
+        case MOTORENCODER_DIRECTION_BACKWARD:
+          HAL_GPIO_WritePin(xMotorEncoderPeripherals.pIn1Port,
+            xMotorEncoderPeripherals.usIn1Pin, GPIO_PIN_SET);
+          HAL_GPIO_WritePin(xMotorEncoderPeripherals.pIn2Port,
+            xMotorEncoderPeripherals.usIn2Pin, GPIO_PIN_RESET);
           break;
 
         case MOTORENCODER_DIRECTION_STOP:
@@ -93,19 +87,18 @@ static void vMotorEncoderSetDirection(motorEncoderMotor_t xMotor,
 
     case MOTORENCODER_MOTOR_LEFT:
       switch (xDirection) {
-        /* FORWARD/BACKWARD invertidos (mesmo motivo do motor direito). */
         case MOTORENCODER_DIRECTION_FORWARD:
-          HAL_GPIO_WritePin(xMotorEncoderPeripherals.pIn3Port,
-            xMotorEncoderPeripherals.usIn3Pin, GPIO_PIN_RESET);
-          HAL_GPIO_WritePin(xMotorEncoderPeripherals.pIn4Port,
-            xMotorEncoderPeripherals.usIn4Pin, GPIO_PIN_SET);
-          break;
-
-        case MOTORENCODER_DIRECTION_BACKWARD:
           HAL_GPIO_WritePin(xMotorEncoderPeripherals.pIn3Port,
             xMotorEncoderPeripherals.usIn3Pin, GPIO_PIN_SET);
           HAL_GPIO_WritePin(xMotorEncoderPeripherals.pIn4Port,
             xMotorEncoderPeripherals.usIn4Pin, GPIO_PIN_RESET);
+          break;
+
+        case MOTORENCODER_DIRECTION_BACKWARD:
+          HAL_GPIO_WritePin(xMotorEncoderPeripherals.pIn3Port,
+            xMotorEncoderPeripherals.usIn3Pin, GPIO_PIN_RESET);
+          HAL_GPIO_WritePin(xMotorEncoderPeripherals.pIn4Port,
+            xMotorEncoderPeripherals.usIn4Pin, GPIO_PIN_SET);
           break;
 
         case MOTORENCODER_DIRECTION_STOP:
@@ -187,10 +180,6 @@ void vMotorEncoderInitMotors(GPIO_TypeDef *pIn1Port, uint16_t usIn1Pin,
     xMotorEncoderPeripherals.uiRightMotorTimerChannel);
   HAL_TIM_PWM_Start(xMotorEncoderPeripherals.pLeftMotorTimerHandle,
     xMotorEncoderPeripherals.uiLeftMotorTimerChannel);
-
-  // NOVO: inicializa as distâncias com zero
-  fRightDistance = 0.0f;
-  fLeftDistance  = 0.0f;
 }
 
 /**
@@ -290,34 +279,6 @@ float fMotorEncoderReadVelocity(motorEncoderMotor_t xMotor)
   }
 }
 
-// NOVO: função para ler a distância acumulada de uma roda (em cm)
-float fMotorEncoderReadDistance(motorEncoderMotor_t xMotor)
-{
-  switch (xMotor) {
-    case MOTORENCODER_MOTOR_RIGHT:
-      return fRightDistance;
-    case MOTORENCODER_MOTOR_LEFT:
-      return fLeftDistance;
-    default:
-      return 0.0f;
-  }
-}
-
-// NOVO: função para resetar a distância de uma roda (opcional)
-void vMotorEncoderResetDistance(motorEncoderMotor_t xMotor)
-{
-  switch (xMotor) {
-    case MOTORENCODER_MOTOR_RIGHT:
-      fRightDistance = 0.0f;
-      break;
-    case MOTORENCODER_MOTOR_LEFT:
-      fLeftDistance = 0.0f;
-      break;
-    default:
-      break;
-  }
-}
-
 /**
  * @brief Handles the encoder timer overflow event.
  *
@@ -391,9 +352,6 @@ void vMotorEncoderHandleTimerCapture(motorEncoderMotor_t xMotor)
         MOTORENCODER_CM_PER_PULSE /
         ((float)llCount / MOTORENCODER_TIMER_CLOCK_HZ);
 
-      // NOVO: acumula a distância percorrida pela roda direita
-      fRightDistance += MOTORENCODER_CM_PER_PULSE;
-
       xMotorEncoderAttributes.uiRightResetCount = 0U;
 
       __HAL_TIM_SET_COUNTER(
@@ -423,9 +381,6 @@ void vMotorEncoderHandleTimerCapture(motorEncoderMotor_t xMotor)
       xMotorEncoderAttributes.fLeftMotorVelocity =
         MOTORENCODER_CM_PER_PULSE /
         ((float)llCount / MOTORENCODER_TIMER_CLOCK_HZ);
-
-      // NOVO: acumula a distância percorrida pela roda esquerda
-      fLeftDistance += MOTORENCODER_CM_PER_PULSE;
 
       xMotorEncoderAttributes.uiLeftResetCount = 0U;
 

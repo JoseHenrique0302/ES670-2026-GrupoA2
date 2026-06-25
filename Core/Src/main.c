@@ -161,20 +161,9 @@ void SystemClock_Config(void)
   * @param  htim : TIM handle
   * @retval None
   */
-void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
-{
-  /* USER CODE BEGIN Callback 0 */
-  /* USER CODE END Callback 0 */
-  if (htim->Instance == TIM2) {
-    HAL_IncTick();
-  }
+
   /* USER CODE BEGIN Callback 1 */
-  // TIM7: fim da janela de debounce dos botões -> valida a transição (I5)
-  if (htim->Instance == TIM7) {
-    vButtonsDebouncingStop();
-  }
-  /* USER CODE END Callback 1 */
-}
+/*USER CODE END Callback 1 */
 
 /**
   * @brief  This function is executed in case of error occurrence.
@@ -183,9 +172,9 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
 void Error_Handler(void)
 {
   /* USER CODE BEGIN Error_Handler_Debug */
-  /* USER CODE END Error_Handler_Debug */
-}
 
+}
+/* USER CODE END Error_Handler_Debug */
 #ifdef  USE_FULL_ASSERT
 /**
   * @brief  Reports the name of the source file and the source line number
