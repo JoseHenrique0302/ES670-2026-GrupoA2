@@ -202,6 +202,9 @@ static volatile uint16_t g_dbgBatRaw    = 0;           // ADC bruto bateria (vTa
 static volatile uint8_t  g_dbgLastBtnId = 255;         // ultimo botao (callback de botao)
 static volatile uint32_t g_dbgBtnCount  = 0;           // total de apertos validados
 static volatile uint32_t g_dbgBtRxCount = 0;           // bytes recebidos via USART3 (BT)
+static volatile uint8_t  g_dbgLcdPage   = 0;           // pagina atual do painel DEBUG_LCD
+                                                        // (avança a cada APERTO de botão -
+                                                        //  troca manual, sem rotação por tempo)
 
 // Buffer circular de recepção da UART: a ISR (I2) escreve o byte e libera
 // semBTRxReady; vTaskUART (T7) drena o buffer e faz o parsing dos comandos.
@@ -869,9 +872,9 @@ void vStartTaskOdometria(void *argument)
 
       // 5. Envia dados para o LCD (via fila)
 #if (DEBUG_LCD != 0)
-      // Painel de diagnostico: 4 paginas que giram a cada ~2,5 s (50 ciclos de 50ms).
-      static uint32_t ulDbgTick = 0;
-      uint8_t ucPage = (uint8_t)((ulDbgTick++ / 50U) % 4U);
+      // Painel de diagnostico: 4 paginas, troca MANUAL a cada aperto de botao
+      // (ver g_dbgLcdPage, incrementado em vButtonsPressedCallback).
+      uint8_t ucPage = g_dbgLcdPage;
       switch (ucPage)
       {
           case 0: // ENCODERS (gire as rodas a mao: L/R devem subir) | pose X/Y
@@ -1355,6 +1358,10 @@ void vButtonsPressedCallback(buttonsEnum_t xButton)
 #if (DEBUG_LCD != 0)
     g_dbgLastBtnId = (uint8_t)xButton;  // pagina SYS: 0=UP 1=DIR 2=ESQ 3=BAIXO 4=ENTER
     g_dbgBtnCount++;
+    // Qualquer aperto valido avanca a pagina do painel (troca manual). O botao
+    // continua disparando sua acao normal de modo (mode/calibracao/teste motor)
+    // ao mesmo tempo, ja que vai para a fila qButtonsEvent como sempre.
+    g_dbgLcdPage = (uint8_t)((g_dbgLcdPage + 1U) % 4U);
 #endif
     osMessageQueuePut(qButtonsEventHandle, &xEvent, 0, 0);
 }
