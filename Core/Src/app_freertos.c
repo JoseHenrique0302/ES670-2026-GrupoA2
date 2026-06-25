@@ -155,13 +155,17 @@ typedef struct {
 // pull-up/down no PD2 na IOC e validar a chave.
 #define BUMPER_EMERGENCY_ENABLED    0
 
-// DIAGNOSTICO da odometria: em 1, a 1a linha do LCD mostra a CONTAGEM BRUTA dos
-// encoders (L:<esq> R:<dir>) em vez de X/Y. Gire cada roda com a mao e veja:
-//  - L/R sobem  -> encoder conta OK; se X/Y/Th nao mudam, o problema e' a conta.
-//  - L/R em 0   -> o encoder NAO esta pulsando (fiacao PB4/PB5, contato, alimentacao
-//                  do sensor) -> a odometria nunca evolui. Nao e' software.
-// Voltar para 0 quando confirmar que conta (mostra X/Y de novo).
-#define ODOMETRY_LCD_RAW_DEBUG      1
+// DEBUG no LCD: em 1, a task de odometria transforma o LCD num painel de
+// diagnostico que GIRA sozinho a cada ~2,5 s (sem precisar de botao/debugger),
+// cobrindo os principais subsistemas. Em 0, o LCD volta ao normal (X/Y + Th/V).
+// Paginas:
+//   0 ENC : "L:<esq> R:<dir>"   contagem bruta dos encoders | X/Y
+//   1 IR  : "IR a b c d e"      binarizacao dos 5 sensores  | Bateria %% + raw
+//   2 SYS : "Mode:<0/1> Cal"    modo/calibracao             | ultimo botao + total
+//   3 BT  : "Th/V"              pose theta/velocidade        | bytes recebidos via BT
+// Use para testar TUDO: gire as rodas (pag0), passe a linha sob os IR (pag1),
+// aperte botoes (pag2), envie comando pelo app (pag3 BTrx sobe).
+#define DEBUG_LCD                   1
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -189,6 +193,15 @@ extern UART_HandleTypeDef huart3;
 // Modo atual do sistema (escrito por vTaskTrocarModo, lido por vTaskSegueLinha).
 // 1 byte -> escrita/leitura atômica no Cortex-M4; dispensa mutex.
 static volatile uint8_t gvSystemMode = MODE_MANUAL;
+
+// --- Snapshots de DEBUG (escritos pelas tasks/ISRs donas, lidos pela odometria
+//     para o LCD multi-pagina; ver DEBUG_LCD). Todos baratos e atomicos o bastante
+//     para diagnostico; nao precisam de mutex. ---
+static volatile uint8_t  g_dbgIR[5]     = {0,0,0,0,0}; // binarizacao IR (vTaskSegueLinha)
+static volatile uint16_t g_dbgBatRaw    = 0;           // ADC bruto bateria (vTaskSegueLinha)
+static volatile uint8_t  g_dbgLastBtnId = 255;         // ultimo botao (callback de botao)
+static volatile uint32_t g_dbgBtnCount  = 0;           // total de apertos validados
+static volatile uint32_t g_dbgBtRxCount = 0;           // bytes recebidos via USART3 (BT)
 
 // Buffer circular de recepção da UART: a ISR (I2) escreve o byte e libera
 // semBTRxReady; vTaskUART (T7) drena o buffer e faz o parsing dos comandos.
@@ -694,9 +707,16 @@ void vStartTaskSegueLinha(void *argument)
 	        for (int i = 0; i < 5; i++)
 	            ucIRBin[i] = (fLineSensors_v2_GetSensorValue((lineSensorsEnum_t)i) > 0.5f) ? 1U : 0U;
 
+#if (DEBUG_LCD != 0)
+	        for (int i = 0; i < 5; i++) g_dbgIR[i] = ucIRBin[i];   // snapshot p/ pagina IR
+#endif
+
 	        /* ---- 2) Bateria + parada de emergência por subtensão (sempre) ---- */
 	        uint16_t usBatteryRaw = usBatteryGetRawValue();
 	        uint8_t  ucBatteryPct = (uint8_t)usBatteryGetCharge();
+#if (DEBUG_LCD != 0)
+	        g_dbgBatRaw = usBatteryRaw;                            // snapshot p/ pagina IR/Bat
+#endif
 	        if (osMutexAcquire(mutexTelemetryHandle, pdMS_TO_TICKS(5)) == osOK)
 	        {
 	            gvTelemetry.batteryPct = ucBatteryPct;
@@ -848,13 +868,38 @@ void vStartTaskOdometria(void *argument)
       }
 
       // 5. Envia dados para o LCD (via fila)
-#if (ODOMETRY_LCD_RAW_DEBUG != 0)
-      // Diagnostico: contagem bruta dos encoders na linha 1 (gire as rodas a mao).
-      snprintf(lcdLine1, 17, "L:%-6ld R:%-6ld", (long)leftCount, (long)rightCount);
+#if (DEBUG_LCD != 0)
+      // Painel de diagnostico: 4 paginas que giram a cada ~2,5 s (50 ciclos de 50ms).
+      static uint32_t ulDbgTick = 0;
+      uint8_t ucPage = (uint8_t)((ulDbgTick++ / 50U) % 4U);
+      switch (ucPage)
+      {
+          case 0: // ENCODERS (gire as rodas a mao: L/R devem subir) | pose X/Y
+              snprintf(lcdLine1, 17, "L%-6ld R%-6ld", (long)leftCount, (long)rightCount);
+              snprintf(lcdLine2, 17, "X:%5.2f Y:%5.2f", gvTelemetry.posX, gvTelemetry.posY);
+              break;
+          case 1: // SENSORES IR (binarizados) | bateria %% + ADC bruto
+              snprintf(lcdLine1, 17, "IR %u %u %u %u %u",
+                       g_dbgIR[0], g_dbgIR[1], g_dbgIR[2], g_dbgIR[3], g_dbgIR[4]);
+              snprintf(lcdLine2, 17, "Bat:%3u%% raw%4u",
+                       gvTelemetry.batteryPct, g_dbgBatRaw);
+              break;
+          case 2: // MODO/CALIBRACAO | ultimo botao (id) + total de apertos
+              snprintf(lcdLine1, 17, "Mode:%u Cal:%u",
+                       gvTelemetry.systemMode, gvTelemetry.calibDone);
+              snprintf(lcdLine2, 17, "Btn:%3u n:%4lu",
+                       g_dbgLastBtnId, (unsigned long)g_dbgBtnCount);
+              break;
+          default: // BLUETOOTH/pose | bytes recebidos via USART3 (sobe ao enviar do app)
+              snprintf(lcdLine1, 17, "Th:%5.2f V:%4.2f",
+                       gvTelemetry.theta, gvTelemetry.speedCurrent);
+              snprintf(lcdLine2, 17, "BTrx:%-9lu", (unsigned long)g_dbgBtRxCount);
+              break;
+      }
 #else
       snprintf(lcdLine1, 17, "X:%5.2f Y:%5.2f", gvTelemetry.posX, gvTelemetry.posY);
-#endif
       snprintf(lcdLine2, 17, "Th:%5.2f V:%4.2f", gvTelemetry.theta, gvTelemetry.speedCurrent);
+#endif
       memcpy(lcdBuffer, lcdLine1, 16);
       memcpy(lcdBuffer + 16, lcdLine2, 16);
       osMessageQueuePut(qLCDDataHandle, lcdBuffer, 0, 0);
@@ -1292,6 +1337,9 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
         gucBt3RxRing[gusBt3RxHead] = gucBt3RxByte;
         gusBt3RxHead = (uint16_t)((gusBt3RxHead + 1U) % BT3_RX_RING_SIZE);
         osSemaphoreRelease(semBTRxReadyHandle);  // mesmo semáforo pode ser usado
+#if (DEBUG_LCD != 0)
+        g_dbgBtRxCount++;                        // pagina BT: prova que chega byte do app
+#endif
         HAL_UART_Receive_IT(huart, &gucBt3RxByte, 1);
     }
 }
@@ -1303,6 +1351,10 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
 void vButtonsPressedCallback(buttonsEnum_t xButton)
 {
     ButtonEvent_t xEvent = { (uint8_t)xButton, 0U }; // 0 = PRESS
+#if (DEBUG_LCD != 0)
+    g_dbgLastBtnId = (uint8_t)xButton;  // pagina SYS: 0=UP 1=DIR 2=ESQ 3=BAIXO 4=ENTER
+    g_dbgBtnCount++;
+#endif
     osMessageQueuePut(qButtonsEventHandle, &xEvent, 0, 0);
 }
 
