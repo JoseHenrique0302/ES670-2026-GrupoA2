@@ -909,6 +909,7 @@ void vStartTaskOdometria(void *argument)
 
   /* USER CODE END vStartTaskOdometria */
 
+
 /* USER CODE BEGIN Header_vStartTaskUART */
 /**
 * @brief Function implementing the vTaskUART thread.
