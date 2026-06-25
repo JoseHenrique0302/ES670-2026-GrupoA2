@@ -34,6 +34,7 @@
 #include "buttons.h"
 #include "string.h"
 #include "stdio.h"
+#include <math.h>
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -704,7 +705,7 @@ void vStartTaskSegueLinha(void *argument)
 	            fError = (fLastError >= 0.0f) ? 2.0f : -2.0f;
 
 	        // Ganhos PID atuais (ajustáveis por Bluetooth via mutexPIDParams)
-	        float fKp = 0.5f, fKi = 0.0f, fKd = 0.0f;
+	        float fKp = 0.1f, fKi = 0.01f, fKd = 0.0f;
 	        if (osMutexAcquire(mutexPIDParamsHandle, pdMS_TO_TICKS(5)) == osOK)
 	        {
 	            fKp = gvPIDParams.fKp;
@@ -746,72 +747,11 @@ void vStartTaskSegueLinha(void *argument)
 void vStartTaskOdometria(void *argument)
 {
   /* USER CODE BEGIN vStartTaskOdometria */
-
-	    (void)argument;
-	    const TickType_t xPeriod = pdMS_TO_TICKS(TASK_PERIOD_ODOMETRY);
-	    TickType_t xLastWakeTime = xTaskGetTickCount();
-	    static float fLastLeftCount = 0, fLastRightCount = 0;
-	    const float WHEEL_BASE = 0.133f;    // distância entre rodas: 133 mm (medido)
-	    const float WHEEL_RADIUS = 0.0315f; // raio da roda: diâmetro 63 mm / 2 (medido)
-	    const float PPR = 20.0f;            // pulsos por volta da roda (medido: 20)
-	    static float fSpeedSum = 0.0f;
-	    static int speedCount = 0;
-	    char lcdLine1[17], lcdLine2[17];
-	    uint8_t lcdBuffer[32];
-
-	    for(;;)
-	    {
-	        vTaskDelayUntil(&xLastWakeTime, xPeriod);
-
-	        int32_t leftCount, rightCount;
-	        taskENTER_CRITICAL();
-	        leftCount = gvEncoderCounts[0];
-	        rightCount = gvEncoderCounts[1];
-	        taskEXIT_CRITICAL();
-
-	        float fDeltaLeft = (leftCount - fLastLeftCount) * (2.0f * 3.14159f * WHEEL_RADIUS) / PPR;
-	        float fDeltaRight = (rightCount - fLastRightCount) * (2.0f * 3.14159f * WHEEL_RADIUS) / PPR;
-	        fLastLeftCount = leftCount;
-	        fLastRightCount = rightCount;
-
-	        float fDeltaDist = (fDeltaLeft + fDeltaRight) / 2.0f;
-	        float fDeltaTheta = (fDeltaRight - fDeltaLeft) / WHEEL_BASE;
-
-	        if (osMutexAcquire(mutexTelemetryHandle, pdMS_TO_TICKS(5)) == osOK)
-	        {
-	        	const float PI = 3.1415926535897932f;
-	            gvTelemetry.posX += fDeltaDist * (float)cosf((double)gvTelemetry.theta);
-	            gvTelemetry.posY += fDeltaDist * (float)sinf((double)gvTelemetry.theta);
-	            gvTelemetry.theta += fDeltaTheta;
-	            // Normaliza theta para (-PI, PI]. ATENÇÃO: a 2ª condição era "< PI"
-	            // (faltava o sinal de menos): como quase todo theta é < PI, somava 2*PI
-	            // todo ciclo -> theta explodia e posX/posY/etc viravam lixo.
-	            if (gvTelemetry.theta >  PI) gvTelemetry.theta -= 2.0f * PI;
-	            if (gvTelemetry.theta < -PI) gvTelemetry.theta += 2.0f * PI;
-
-	            float fSpeed = fDeltaDist / (TASK_PERIOD_ODOMETRY / 1000.0f);
-	            gvTelemetry.speedCurrent = fSpeed;
-	            gvTelemetry.distTotal += fabsf(fDeltaDist);
-
-	            fSpeedSum += fSpeed;
-	            speedCount++;
-	            if (speedCount >= 20) // média a cada 1s
-	            {
-	                gvTelemetry.speedAverage = fSpeedSum / speedCount;
-	                fSpeedSum = 0.0f;
-	                speedCount = 0;
-	            }
-	            osMutexRelease(mutexTelemetryHandle);
-	        }
-
-	        // Prepara strings para o LCD
-	        snprintf(lcdLine1, 17, "X:%5.2f Y:%5.2f", gvTelemetry.posX, gvTelemetry.posY);
-	        snprintf(lcdLine2, 17, "Th:%5.2f V:%4.2f", gvTelemetry.theta, gvTelemetry.speedCurrent);
-	        memcpy(lcdBuffer, lcdLine1, 16);
-	        memcpy(lcdBuffer+16, lcdLine2, 16);
-	        osMessageQueuePut(qLCDDataHandle, lcdBuffer, 0, 0);
-	    }
-
+  /* Infinite loop */
+  for(;;)
+  {
+    osDelay(1);
+  }
   /* USER CODE END vStartTaskOdometria */
 }
 

@@ -8,7 +8,7 @@
  *
  * @author rodri
  * @date 19-Oct-2025
- * @version 1.1
+ * @version 1.2  // Incrementado para refletir a adição da distância
  */
 
 #include "motorEncoder.h"
@@ -36,6 +36,10 @@ typedef struct {
 
 static motorEncoderPeripherals_t xMotorEncoderPeripherals;
 static motorEncoderAttributes_t xMotorEncoderAttributes;
+
+// NOVO: variáveis estáticas para acumular a distância percorrida por cada roda (em cm)
+static float fRightDistance = 0.0f;
+static float fLeftDistance  = 0.0f;
 
 /**
  * @brief Sets the direction pins of one motor.
@@ -183,6 +187,10 @@ void vMotorEncoderInitMotors(GPIO_TypeDef *pIn1Port, uint16_t usIn1Pin,
     xMotorEncoderPeripherals.uiRightMotorTimerChannel);
   HAL_TIM_PWM_Start(xMotorEncoderPeripherals.pLeftMotorTimerHandle,
     xMotorEncoderPeripherals.uiLeftMotorTimerChannel);
+
+  // NOVO: inicializa as distâncias com zero
+  fRightDistance = 0.0f;
+  fLeftDistance  = 0.0f;
 }
 
 /**
@@ -282,6 +290,34 @@ float fMotorEncoderReadVelocity(motorEncoderMotor_t xMotor)
   }
 }
 
+// NOVO: função para ler a distância acumulada de uma roda (em cm)
+float fMotorEncoderReadDistance(motorEncoderMotor_t xMotor)
+{
+  switch (xMotor) {
+    case MOTORENCODER_MOTOR_RIGHT:
+      return fRightDistance;
+    case MOTORENCODER_MOTOR_LEFT:
+      return fLeftDistance;
+    default:
+      return 0.0f;
+  }
+}
+
+// NOVO: função para resetar a distância de uma roda (opcional)
+void vMotorEncoderResetDistance(motorEncoderMotor_t xMotor)
+{
+  switch (xMotor) {
+    case MOTORENCODER_MOTOR_RIGHT:
+      fRightDistance = 0.0f;
+      break;
+    case MOTORENCODER_MOTOR_LEFT:
+      fLeftDistance = 0.0f;
+      break;
+    default:
+      break;
+  }
+}
+
 /**
  * @brief Handles the encoder timer overflow event.
  *
@@ -355,6 +391,9 @@ void vMotorEncoderHandleTimerCapture(motorEncoderMotor_t xMotor)
         MOTORENCODER_CM_PER_PULSE /
         ((float)llCount / MOTORENCODER_TIMER_CLOCK_HZ);
 
+      // NOVO: acumula a distância percorrida pela roda direita
+      fRightDistance += MOTORENCODER_CM_PER_PULSE;
+
       xMotorEncoderAttributes.uiRightResetCount = 0U;
 
       __HAL_TIM_SET_COUNTER(
@@ -384,6 +423,9 @@ void vMotorEncoderHandleTimerCapture(motorEncoderMotor_t xMotor)
       xMotorEncoderAttributes.fLeftMotorVelocity =
         MOTORENCODER_CM_PER_PULSE /
         ((float)llCount / MOTORENCODER_TIMER_CLOCK_HZ);
+
+      // NOVO: acumula a distância percorrida pela roda esquerda
+      fLeftDistance += MOTORENCODER_CM_PER_PULSE;
 
       xMotorEncoderAttributes.uiLeftResetCount = 0U;
 
