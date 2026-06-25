@@ -154,6 +154,14 @@ typedef struct {
 // (a emergência nunca é limpa e congela o vTaskMotor). Religar (1) só após pôr
 // pull-up/down no PD2 na IOC e validar a chave.
 #define BUMPER_EMERGENCY_ENABLED    0
+
+// DIAGNOSTICO da odometria: em 1, a 1a linha do LCD mostra a CONTAGEM BRUTA dos
+// encoders (L:<esq> R:<dir>) em vez de X/Y. Gire cada roda com a mao e veja:
+//  - L/R sobem  -> encoder conta OK; se X/Y/Th nao mudam, o problema e' a conta.
+//  - L/R em 0   -> o encoder NAO esta pulsando (fiacao PB4/PB5, contato, alimentacao
+//                  do sensor) -> a odometria nunca evolui. Nao e' software.
+// Voltar para 0 quando confirmar que conta (mostra X/Y de novo).
+#define ODOMETRY_LCD_RAW_DEBUG      1
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -840,7 +848,12 @@ void vStartTaskOdometria(void *argument)
       }
 
       // 5. Envia dados para o LCD (via fila)
+#if (ODOMETRY_LCD_RAW_DEBUG != 0)
+      // Diagnostico: contagem bruta dos encoders na linha 1 (gire as rodas a mao).
+      snprintf(lcdLine1, 17, "L:%-6ld R:%-6ld", (long)leftCount, (long)rightCount);
+#else
       snprintf(lcdLine1, 17, "X:%5.2f Y:%5.2f", gvTelemetry.posX, gvTelemetry.posY);
+#endif
       snprintf(lcdLine2, 17, "Th:%5.2f V:%4.2f", gvTelemetry.theta, gvTelemetry.speedCurrent);
       memcpy(lcdBuffer, lcdLine1, 16);
       memcpy(lcdBuffer + 16, lcdLine2, 16);
