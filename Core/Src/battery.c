@@ -20,6 +20,30 @@ typedef struct {
   uint16_t usMin;
 } batteryAttributes_t;
 
+typedef struct {
+  float voltage;
+  uint8_t soc;
+} batteryTable_t;
+
+#define ADC_MAX 4095.0f
+#define VREF 3.3f
+#define BATTERY_GAIN 2.49f
+
+static const batteryTable_t batteryTable[] = {
+  {8.2f, 100},
+  {7.9f, 90},
+  {7.8f, 80},
+  {7.6f, 70},
+  {7.4f, 60},
+  {7.0f, 50},
+  {6.8f, 40},
+  {6.7f, 30},
+  {6.6f, 20},
+  {6.4f, 10},
+  {6.2f, 5},
+  {6.0f, 0}
+};
+
 #define BATTERY_MAX_INITIAL_VALUE 4095U
 #define BATTERY_MIN_INITIAL_VALUE 2500U
 #define BATTERY_PERCENTAGE    100U
@@ -73,24 +97,27 @@ uint16_t usBatteryGetRawValue(void) {
  * @return Battery charge in percentage.
  */
 uint16_t usBatteryGetCharge(void) {
-  unsigned int uiCharge;
-  unsigned int uiRange;
+  float vbat;
+  int i;
 
-  if (xBatteryAttributes.usCharge <= xBatteryAttributes.usMin) {
-    return 0U;
+  vbat = ((float)xBatteryAttributes.usCharge / ADC_MAX) * VREF * BATTERY_GAIN;
+
+  if (vbat >= 8.2f) return 100;
+  if (vbat <= 5.5f) return 0;
+
+  for (i = 0; i < (sizeof(batteryTable)/sizeof(batteryTable[0])) - 1; i++) {
+    if (vbat <= batteryTable[i].voltage && vbat > batteryTable[i+1].voltage) {
+
+      float v1 = batteryTable[i].voltage;
+      float v2 = batteryTable[i+1].voltage;
+      float soc1 = batteryTable[i].soc;
+      float soc2 = batteryTable[i+1].soc;
+
+      float soc = soc1 + (vbat - v1) * (soc2 - soc1) / (v2 - v1);
+
+      return (uint16_t)soc;
+    }
   }
 
-  if (xBatteryAttributes.usCharge >= xBatteryAttributes.usMax) {
-    return BATTERY_PERCENTAGE;
-  }
-
-  if (xBatteryAttributes.usMax <= xBatteryAttributes.usMin) {
-    return 0U;
-  }
-
-  uiCharge = (unsigned int)(xBatteryAttributes.usCharge - xBatteryAttributes.usMin);
-
-  uiRange = (unsigned int)(xBatteryAttributes.usMax - xBatteryAttributes.usMin);
-
-  return (uint16_t)(uiCharge * BATTERY_PERCENTAGE / uiRange);
+  return 0;
 }

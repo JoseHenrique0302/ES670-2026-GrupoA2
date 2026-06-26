@@ -70,10 +70,10 @@ void HAL_OPAMP_MspInit(OPAMP_HandleTypeDef* opampHandle)
     /**OPAMP1 GPIO Configuration
     PA7     ------> OPAMP1_VINP
     */
-    GPIO_InitStruct.Pin = GPIO_PIN_7;
+    GPIO_InitStruct.Pin = Bateria_AD_Pin;
     GPIO_InitStruct.Mode = GPIO_MODE_ANALOG;
     GPIO_InitStruct.Pull = GPIO_NOPULL;
-    HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
+    HAL_GPIO_Init(Bateria_AD_GPIO_Port, &GPIO_InitStruct);
 
   /* USER CODE BEGIN OPAMP1_MspInit 1 */
 
@@ -93,7 +93,7 @@ void HAL_OPAMP_MspDeInit(OPAMP_HandleTypeDef* opampHandle)
     /**OPAMP1 GPIO Configuration
     PA7     ------> OPAMP1_VINP
     */
-    HAL_GPIO_DeInit(GPIOA, GPIO_PIN_7);
+    HAL_GPIO_DeInit(Bateria_AD_GPIO_Port, Bateria_AD_Pin);
 
   /* USER CODE BEGIN OPAMP1_MspDeInit 1 */
 

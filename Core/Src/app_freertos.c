@@ -22,7 +22,6 @@
 #include "task.h"
 #include "main.h"
 #include "cmsis_os.h"
-#include <math.h>
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
@@ -33,8 +32,10 @@
 #include "distanceSensor.h"
 #include "lcd_hd44780_i2c.h"
 #include "buttons.h"
+#include "usart.h"
 #include "string.h"
 #include "stdio.h"
+#include <math.h>
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -137,6 +138,7 @@ typedef struct {
 #define BATTERY_MIN_PCT         10U    // emergência se carga < 10%
 #define STOP_DISTANCE_CM        5.0f
 
+
 /* USER CODE END PTD */
 
 /* Private define ------------------------------------------------------------*/
@@ -145,7 +147,22 @@ typedef struct {
 // sensor nem aciona o buzzer e o trigger (TIM20/TIM3) nem é iniciado — evita o
 // alarme falso (pino de eco flutuando lê <5cm -> zona de STOP -> freq. máxima)
 // enquanto focamos no seguir-linha. Para REABILITAR no futuro: trocar para 1.
-#define ULTRASONIC_BUZZER_ENABLED   0
+#define ULTRASONIC_BUZZER_ENABLED   1
+
+// Bumper frontal (PD2/Switch_Fr) como parada de emergência. Em 0, o EXTI do PD2
+// NÃO seta a emergência — evita TRAVAR o robô se o PD2 estiver flutuando/sem pull
+// (a emergência nunca é limpa e congela o vTaskMotor). Religar (1) só após pôr
+// pull-up/down no PD2 na IOC e validar a chave.
+#define BUMPER_EMERGENCY_ENABLED    1
+
+// LEDs RGB no TIM4 (PWM, ARR=999). Usados como indicadores:
+//   - Vermelho (CH1, PA11): aceso em modo MANUAL, apagado em AUTOMÁTICO.
+//   - Azul     (CH3, PB8) : aceso enquanto a calibração está em andamento.
+// Aceso=999, apagado=0. (Se a placa for ativa-baixa, troque LED_ON/LED_OFF.)
+#define LED_ON   999
+#define LED_OFF  0
+#define LED_MANUAL_SET(on)  __HAL_TIM_SET_COMPARE(&htim4, TIM_CHANNEL_1, (on) ? LED_ON : LED_OFF)
+#define LED_CALIB_SET(on)   __HAL_TIM_SET_COMPARE(&htim4, TIM_CHANNEL_3, (on) ? LED_ON : LED_OFF)
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -166,8 +183,9 @@ static volatile uint32_t g_ultrasonicEchoTicks = 0;    // GV4: tempo do eco em t
 extern I2C_HandleTypeDef hi2c2;
 
 // Handles dos timers e UART (gerados pelo CubeMX)
-extern TIM_HandleTypeDef htim1, htim8, htim16, htim17, htim20, htim3, htim7;
+extern TIM_HandleTypeDef htim1, htim8, htim16, htim17, htim20, htim3, htim7, htim4;
 extern UART_HandleTypeDef hlpuart1;
+extern UART_HandleTypeDef huart3;
 
 // Modo atual do sistema (escrito por vTaskTrocarModo, lido por vTaskSegueLinha).
 // 1 byte -> escrita/leitura atômica no Cortex-M4; dispensa mutex.
@@ -180,6 +198,13 @@ static uint8_t  gucBtRxRing[BT_RX_RING_SIZE];
 static volatile uint16_t gusBtRxHead = 0;
 static volatile uint16_t gusBtRxTail = 0;
 static uint8_t  gucBtRxByte = 0;   // destino do HAL_UART_Receive_IT
+
+// Buffer circular para a USART3 (Bluetooth)
+#define BT3_RX_RING_SIZE 128U
+static uint8_t  gucBt3RxRing[BT3_RX_RING_SIZE];
+static volatile uint16_t gusBt3RxHead = 0;
+static volatile uint16_t gusBt3RxTail = 0;
+static uint8_t  gucBt3RxByte = 0;   // destino do HAL_UART_Receive_IT para USART3
 
 // Definição dos pinos dos motores (conforme gpio.c)
 #define MOTOR_DIR_IN1_Pin   Motor_Dir_IN1_Pin
@@ -204,56 +229,56 @@ osThreadId_t vTaskCalibracaoHandle;
 const osThreadAttr_t vTaskCalibracao_attributes = {
   .name = "vTaskCalibracao",
   .priority = (osPriority_t) osPriorityNormal,
-  .stack_size = 128 * 4
+  .stack_size = 512 * 4
 };
 /* Definitions for vTaskMotor */
 osThreadId_t vTaskMotorHandle;
 const osThreadAttr_t vTaskMotor_attributes = {
   .name = "vTaskMotor",
   .priority = (osPriority_t) osPriorityRealtime,
-  .stack_size = 128 * 4
+  .stack_size = 512 * 4
 };
 /* Definitions for vTaskSegueLinha */
 osThreadId_t vTaskSegueLinhaHandle;
 const osThreadAttr_t vTaskSegueLinha_attributes = {
   .name = "vTaskSegueLinha",
   .priority = (osPriority_t) osPriorityHigh,
-  .stack_size = 256 * 4
+  .stack_size = 512 * 4
 };
 /* Definitions for vTaskOdometria */
 osThreadId_t vTaskOdometriaHandle;
 const osThreadAttr_t vTaskOdometria_attributes = {
   .name = "vTaskOdometria",
   .priority = (osPriority_t) osPriorityNormal,
-  .stack_size = 512 * 4   /* snprintf com float (-u_printf_float) precisa de >1KB */
+  .stack_size = 2048 * 4
 };
 /* Definitions for vTaskUART */
 osThreadId_t vTaskUARTHandle;
 const osThreadAttr_t vTaskUART_attributes = {
   .name = "vTaskUART",
   .priority = (osPriority_t) osPriorityBelowNormal4,
-  .stack_size = 512 * 4   /* txBuffer[256] + snprintf/sscanf com float -> >1.5KB */
+  .stack_size = 512 * 4
 };
 /* Definitions for vTaskLCD */
 osThreadId_t vTaskLCDHandle;
 const osThreadAttr_t vTaskLCD_attributes = {
   .name = "vTaskLCD",
   .priority = (osPriority_t) osPriorityLow,
-  .stack_size = 256 * 4
+  .stack_size = 512 * 4
 };
 /* Definitions for vTaskTrocarModo */
 osThreadId_t vTaskTrocarModoHandle;
 const osThreadAttr_t vTaskTrocarModo_attributes = {
   .name = "vTaskTrocarModo",
   .priority = (osPriority_t) osPriorityLow,
-  .stack_size = 128 * 4
+  .stack_size = 256 * 4
 };
 /* Definitions for vTaskUltraBuzz */
 osThreadId_t vTaskUltraBuzzHandle;
 const osThreadAttr_t vTaskUltraBuzz_attributes = {
   .name = "vTaskUltraBuzz",
   .priority = (osPriority_t) osPriorityAboveNormal,
-  .stack_size = 128 * 4
+  .stack_size = 1024 * 4
 };
 /* Definitions for qMotorCommand */
 osMessageQueueId_t qMotorCommandHandle;
@@ -382,7 +407,16 @@ void MX_FREERTOS_Init(void) {
 
     // Buzzer no TIM8_CH1 (PA15): inicia o PWM com duty 0 (silencioso)
     HAL_TIM_PWM_Start(&htim8, TIM_CHANNEL_1);
+    // (removido o HAL_TIM_Base_Start_IT(&htim7): o buttons.c já dá start/stop do
+    //  TIM7 a cada debounce; deixá-lo livre desde o boot atrapalhava os botões.)
     __HAL_TIM_SET_COMPARE(&htim8, TIM_CHANNEL_1, 0);
+
+    // LEDs indicadores no TIM4: vermelho (CH1, modo) e azul (CH3, calibração).
+    // Começa com vermelho ACESO (boot em MANUAL) e azul apagado.
+    HAL_TIM_PWM_Start(&htim4, TIM_CHANNEL_1);
+    HAL_TIM_PWM_Start(&htim4, TIM_CHANNEL_3);
+    LED_MANUAL_SET(1);
+    LED_CALIB_SET(0);
 
     // Botões (debounce por software usando o TIM7). Ordem: Up, Right, Left, Down, Enter
     ucButtonsInit(BT_Cima_GPIO_Port,  BT_Cima_Pin,
@@ -430,6 +464,8 @@ void MX_FREERTOS_Init(void) {
   /* Arma a recepção da UART por interrupção (1 byte por vez) somente após o
    * semáforo semBTRxReady existir -> ISR I2 (HAL_UART_RxCpltCallback). */
   HAL_UART_Receive_IT(&hlpuart1, &gucBtRxByte, 1);
+  // Inicializa a recepção da USART3 (Bluetooth)
+  HAL_UART_Receive_IT(&huart3, &gucBt3RxByte, 1);
   /* USER CODE END RTOS_SEMAPHORES */
 
   /* USER CODE BEGIN RTOS_TIMERS */
@@ -548,15 +584,25 @@ void vStartTaskCalibration(void *argument)
 	    {
 	        vTaskSuspend(NULL);   // aguarda ser resumida por T7
 
+	        // LED azul ACESO sinaliza calibração em andamento -> o operador sabe
+	        // a hora de deslizar o robô cruzando a linha (preto e branco) para o
+	        // driver capturar o min/max de cada sensor.
+	        LED_CALIB_SET(1);
+
 	        // Reseta e atualiza calibração. O driver v2 guarda min/max de cada
 	        // sensor internamente; a normalização (fLineSensors_v2_GetSensorValue)
 	        // já usa esses limites, então não há limiar a calcular aqui.
+	        // 3 s de janela (300 x 10 ms): tempo para passar a barra de sensores
+	        // sobre a linha. Os 200 ms antigos nem davam para mover o robô, entao
+	        // a calibração não capturava o contraste (ficava "feita" só no nome).
 	        vLineSensors_v2_ResetCalibration();
-	        for (int i = 0; i < 20; i++)   // 200ms de amostragem
+	        for (int i = 0; i < 1000; i++)
 	        {
 	            vLineSensors_v2_UpdateCalibration();
 	            vTaskDelay(pdMS_TO_TICKS(10));
 	        }
+
+	        LED_CALIB_SET(0);   // fim da calibração -> apaga o azul
 
 	        // Atualiza flag na telemetria
 	        if (osMutexAcquire(mutexTelemetryHandle, pdMS_TO_TICKS(100)) == osOK)
@@ -645,7 +691,7 @@ void vStartTaskSegueLinha(void *argument)
 
 	    // Parâmetros do controle de seguimento (ajustáveis)
 	    const float fBaseSpeed   = 0.40f;   // duty base (0..1) das rodas
-	    const float fTurnLimit   = 0.40f;   // limite de correção (mantém duty >= 0)
+	    const float fTurnLimit   = 0.90f;   // limite de correção (mantém duty >= 0)
 	    const float fIntegralMax = 50.0f;   // anti-windup do integrador
 
 	    // Estado do PID de linha (saída SIMÉTRICA: vira p/ esquerda e direita)
@@ -705,7 +751,7 @@ void vStartTaskSegueLinha(void *argument)
 	            fError = (fLastError >= 0.0f) ? 2.0f : -2.0f;
 
 	        // Ganhos PID atuais (ajustáveis por Bluetooth via mutexPIDParams)
-	        float fKp = 0.5f, fKi = 0.0f, fKd = 0.0f;
+	        float fKp = 0.04f, fKi = 0.01f, fKd = 0.0f;
 	        if (osMutexAcquire(mutexPIDParamsHandle, pdMS_TO_TICKS(5)) == osOK)
 	        {
 	            fKp = gvPIDParams.fKp;
@@ -725,8 +771,8 @@ void vStartTaskSegueLinha(void *argument)
 	        if (fTurn >  fTurnLimit) fTurn =  fTurnLimit;
 	        if (fTurn < -fTurnLimit) fTurn = -fTurnLimit;
 
-	        xCmd.fSpeedLeft  = fBaseSpeed + fTurn;
-	        xCmd.fSpeedRight = fBaseSpeed - fTurn;
+	        xCmd.fSpeedLeft  = fBaseSpeed - fTurn;
+	        xCmd.fSpeedRight = fBaseSpeed + fTurn;
 	        if (xCmd.fSpeedLeft  < 0.0f) xCmd.fSpeedLeft  = 0.0f;
 	        if (xCmd.fSpeedLeft  > 1.0f) xCmd.fSpeedLeft  = 1.0f;
 	        if (xCmd.fSpeedRight < 0.0f) xCmd.fSpeedRight = 0.0f;
@@ -747,71 +793,79 @@ void vStartTaskSegueLinha(void *argument)
 void vStartTaskOdometria(void *argument)
 {
   /* USER CODE BEGIN vStartTaskOdometria */
+    (void)argument;
 
-	    (void)argument;
-	    const TickType_t xPeriod = pdMS_TO_TICKS(TASK_PERIOD_ODOMETRY);
-	    TickType_t xLastWakeTime = xTaskGetTickCount();
-	    static float fLastLeftCount = 0, fLastRightCount = 0;
-	    const float WHEEL_BASE = 0.133f;    // distância entre rodas: 133 mm (medido)
-	    const float WHEEL_RADIUS = 0.0315f; // raio da roda: diâmetro 63 mm / 2 (medido)
-	    const float PPR = 20.0f;            // pulsos por volta da roda (medido: 20)
-	    static float fSpeedSum = 0.0f;
-	    static int speedCount = 0;
-	    char lcdLine1[17], lcdLine2[17];
-	    uint8_t lcdBuffer[32];
+    const TickType_t xPeriod = pdMS_TO_TICKS(TASK_PERIOD_ODOMETRY); // 50 ms
+    TickType_t xLastWakeTime = xTaskGetTickCount();
 
-	    for(;;)
-	    {
-	        vTaskDelayUntil(&xLastWakeTime, xPeriod);
+    static float fLastLeftCount = 0.0f, fLastRightCount = 0.0f;
 
-	        int32_t leftCount, rightCount;
-	        taskENTER_CRITICAL();
-	        leftCount = gvEncoderCounts[0];
-	        rightCount = gvEncoderCounts[1];
-	        taskEXIT_CRITICAL();
+    // Parâmetros geométricos do robô (em metros)
+    const float WHEEL_RADIUS = 0.0315f;        // raio da roda (diâmetro 63 mm / 2)
+    const float HALF_WHEEL_BASE = 0.0665f;     // E = distância entre rodas / 2 (133 mm / 2)
+    const float PPR = 20.0f;                   // pulsos por revolução (x1)
+    const float METERS_PER_TICK = (2.0f * 3.1415926535897932f * WHEEL_RADIUS) / PPR;
 
-	        float fDeltaLeft = (leftCount - fLastLeftCount) * (2.0f * 3.14159f * WHEEL_RADIUS) / PPR;
-	        float fDeltaRight = (rightCount - fLastRightCount) * (2.0f * 3.14159f * WHEEL_RADIUS) / PPR;
-	        fLastLeftCount = leftCount;
-	        fLastRightCount = rightCount;
+    // Variáveis para média de velocidade
+    static float fSpeedSum = 0.0f;
+    static int speedCount = 0;
 
-	        float fDeltaDist = (fDeltaLeft + fDeltaRight) / 2.0f;
-	        float fDeltaTheta = (fDeltaRight - fDeltaLeft) / WHEEL_BASE;
+  /* Infinite loop */
+  for(;;)
+  {
+      vTaskDelayUntil(&xLastWakeTime, xPeriod);
 
-	        if (osMutexAcquire(mutexTelemetryHandle, pdMS_TO_TICKS(5)) == osOK)
-	        {
-	        	const float PI = 3.1415926535897932f;
-	            gvTelemetry.posX += fDeltaDist * (float)cosf((double)gvTelemetry.theta);
-	            gvTelemetry.posY += fDeltaDist * (float)sinf((double)gvTelemetry.theta);
-	            gvTelemetry.theta += fDeltaTheta;
-	            // Normaliza theta para (-PI, PI]. ATENÇÃO: a 2ª condição era "< PI"
-	            // (faltava o sinal de menos): como quase todo theta é < PI, somava 2*PI
-	            // todo ciclo -> theta explodia e posX/posY/etc viravam lixo.
-	            if (gvTelemetry.theta >  PI) gvTelemetry.theta -= 2.0f * PI;
-	            if (gvTelemetry.theta < -PI) gvTelemetry.theta += 2.0f * PI;
+      // 1. Leitura atômica dos contadores dos encoders
+      int32_t leftCount, rightCount;
+      taskENTER_CRITICAL();
+      leftCount = gvEncoderCounts[0];
+      rightCount = gvEncoderCounts[1];
+      taskEXIT_CRITICAL();
 
-	            float fSpeed = fDeltaDist / (TASK_PERIOD_ODOMETRY / 1000.0f);
-	            gvTelemetry.speedCurrent = fSpeed;
-	            gvTelemetry.distTotal += fabsf(fDeltaDist);
+      // 2. Incrementos em metros para cada roda
+      float fDeltaLeft  = (leftCount  - fLastLeftCount)  * METERS_PER_TICK;
+      float fDeltaRight = (rightCount - fLastRightCount) * METERS_PER_TICK;
+      fLastLeftCount  = leftCount;
+      fLastRightCount = rightCount;
+      // 3. Cinemática diferencial
+      float fDeltaDist  = (fDeltaLeft + fDeltaRight) * 0.5f;
+      float fDeltaTheta = (fDeltaRight - fDeltaLeft) / (2.0f * HALF_WHEEL_BASE);
 
-	            fSpeedSum += fSpeed;
-	            speedCount++;
-	            if (speedCount >= 20) // média a cada 1s
-	            {
-	                gvTelemetry.speedAverage = fSpeedSum / speedCount;
-	                fSpeedSum = 0.0f;
-	                speedCount = 0;
-	            }
-	            osMutexRelease(mutexTelemetryHandle);
-	        }
+      // 4. Atualização da pose
+      if (osMutexAcquire(mutexTelemetryHandle, pdMS_TO_TICKS(5)) == osOK)
+      {
+          const float PI = 3.1415926535897932f;
+          float theta_mid = gvTelemetry.theta + fDeltaTheta * 0.5f;
 
-	        // Prepara strings para o LCD
-	        snprintf(lcdLine1, 17, "X:%5.2f Y:%5.2f", gvTelemetry.posX, gvTelemetry.posY);
-	        snprintf(lcdLine2, 17, "Th:%5.2f V:%4.2f", gvTelemetry.theta, gvTelemetry.speedCurrent);
-	        memcpy(lcdBuffer, lcdLine1, 16);
-	        memcpy(lcdBuffer+16, lcdLine2, 16);
-	        osMessageQueuePut(qLCDDataHandle, lcdBuffer, 0, 0);
-	    }
+          gvTelemetry.posX += fDeltaDist * cosf(theta_mid);
+          gvTelemetry.posY += fDeltaDist * sinf(theta_mid);
+          gvTelemetry.theta += fDeltaTheta;
+
+          if (gvTelemetry.theta >  PI) gvTelemetry.theta -= 2.0f * PI;
+          if (gvTelemetry.theta < -PI) gvTelemetry.theta += 2.0f * PI;
+
+          float dt = TASK_PERIOD_ODOMETRY / 1000.0f;
+          float fSpeed = fDeltaDist / dt;
+          gvTelemetry.speedCurrent = fSpeed;
+          gvTelemetry.distTotal += fabsf(fDeltaDist);
+
+          fSpeedSum += fSpeed;
+          speedCount++;
+          if (speedCount >= 20)
+          {
+              gvTelemetry.speedAverage = fSpeedSum / speedCount;
+              fSpeedSum = 0.0f;
+              speedCount = 0;
+          }
+
+          osMutexRelease(mutexTelemetryHandle);
+      }
+
+      // A exibição no LCD foi movida para a vTaskLCD (lê gvTelemetry sob mutex e
+      // formata a 1 Hz). Assim a odometria só integra a pose e não há mais a fila
+      // do LCD enchendo (20 Hz de push vs 1 Hz de leitura) que mostrava dado velho.
+  }
+
 
   /* USER CODE END vStartTaskOdometria */
 }
@@ -826,90 +880,104 @@ void vStartTaskOdometria(void *argument)
 void vStartTaskUART(void *argument)
 {
   /* USER CODE BEGIN vStartTaskUART */
+    (void)argument;
+    uint8_t ucRxByte;
+    static uint8_t rxBuffer[64];
+    static uint8_t rxIndex = 0;
+    TelemetryData_t telemetrySnap;
+    char txBuffer[256];
+    const TickType_t xTelemetryPeriod = pdMS_TO_TICKS(1000);
+    TickType_t xLastTelemetryTime = xTaskGetTickCount();
+
+    // Função interna para processar um byte recebido e montar comandos
+    void processByte(uint8_t byte)
+    {
+        if (byte == '\n' || byte == '\r')
+        {
+            rxBuffer[rxIndex] = '\0';
+            // Processa comando (exatamente como antes)
+            if (strcmp((char*)rxBuffer, "CALIBRATE") == 0)
+                vTaskResume(vTaskCalibracaoHandle);
+            else if (strncmp((char*)rxBuffer, "SET_PID ", 8) == 0)
+            {
+                float kp, ki, kd;
+                sscanf((char*)rxBuffer+8, "%f %f %f", &kp, &ki, &kd);
+                if (osMutexAcquire(mutexPIDParamsHandle, pdMS_TO_TICKS(5)) == osOK)
+                {
+                    gvPIDParams.fKp = kp;
+                    gvPIDParams.fKi = ki;
+                    gvPIDParams.fKd = kd;
+                    osMutexRelease(mutexPIDParamsHandle);
+                }
+            }
+            else if (strcmp((char*)rxBuffer, "GET_PID") == 0)
+            {
+                float kp, ki, kd;
+                if (osMutexAcquire(mutexPIDParamsHandle, pdMS_TO_TICKS(5)) == osOK)
+                {
+                    kp = gvPIDParams.fKp;
+                    ki = gvPIDParams.fKi;
+                    kd = gvPIDParams.fKd;
+                    osMutexRelease(mutexPIDParamsHandle);
+                }
+                snprintf(txBuffer, sizeof(txBuffer), "PID:%.2f %.2f %.2f\r\n", kp, ki, kd);
+                HAL_UART_Transmit(&huart3, (uint8_t*)txBuffer, strlen(txBuffer), 100);
+            }
+            else if (strcmp((char*)rxBuffer, "MANUAL") == 0)
+            {
+                uint8_t mode = MODE_MANUAL;
+                osMessageQueuePut(qTrocaModoHandle, &mode, 0, 0);
+            }
+            else if (strcmp((char*)rxBuffer, "AUTO") == 0)
+            {
+                uint8_t mode = MODE_AUTONOMOUS;
+                osMessageQueuePut(qTrocaModoHandle, &mode, 0, 0);
+            }
+            else if (strncmp((char*)rxBuffer, "MOTOR ", 6) == 0)
+            {
+                float left, right;
+                sscanf((char*)rxBuffer+6, "%f %f", &left, &right);
+                MotorCommand_t cmd = {left, right, 2}; // MANUAL
+                osMessageQueuePut(qMotorCommandHandle, &cmd, 0, 0);
+            }
+            else if (strcmp((char*)rxBuffer, "STOP") == 0)
+            {
+                MotorCommand_t cmd = {0,0,0};
+                osMessageQueuePut(qMotorCommandHandle, &cmd, 0, 0);
+            }
+            rxIndex = 0;
+        }
+        else if (rxIndex < sizeof(rxBuffer)-1)
+        {
+            rxBuffer[rxIndex++] = byte;
+        }
+    }
+
   /* Infinite loop */
-	    (void)argument;
-	    uint8_t ucRxByte;
-	    static uint8_t rxBuffer[64];
-	    static uint8_t rxIndex = 0;
-	    TelemetryData_t telemetrySnap;
-	    char txBuffer[256];
-	    const TickType_t xTelemetryPeriod = pdMS_TO_TICKS(1000);
-	    TickType_t xLastTelemetryTime = xTaskGetTickCount();
+
 
 	    for(;;)
 	    {
-	        // Aguarda o sinal da ISR (I2) indicando byte(s) recebido(s)
+	        // Aguarda dados de qualquer UART
 	        if (osSemaphoreAcquire(semBTRxReadyHandle, pdMS_TO_TICKS(100)) == osOK)
 	        {
-	          // Drena todos os bytes disponíveis no buffer circular preenchido pela ISR
-	          while (gusBtRxTail != gusBtRxHead)
-	          {
-	            ucRxByte = gucBtRxRing[gusBtRxTail];
-	            gusBtRxTail = (uint16_t)((gusBtRxTail + 1U) % BT_RX_RING_SIZE);
-
-	            if (ucRxByte == '\n' || ucRxByte == '\r')
+	            // Drena bytes da LPUART1
+	            while (gusBtRxTail != gusBtRxHead)
 	            {
-	                rxBuffer[rxIndex] = '\0';
-	                // Processa comando
-	                if (strcmp((char*)rxBuffer, "CALIBRATE") == 0)
-	                    vTaskResume(vTaskCalibracaoHandle);
-	                else if (strncmp((char*)rxBuffer, "SET_PID ", 8) == 0)
-	                {
-	                    float kp, ki, kd;
-	                    sscanf((char*)rxBuffer+8, "%f %f %f", &kp, &ki, &kd);
-	                    if (osMutexAcquire(mutexPIDParamsHandle, pdMS_TO_TICKS(5)) == osOK)
-	                    {
-	                        gvPIDParams.fKp = kp;
-	                        gvPIDParams.fKi = ki;
-	                        gvPIDParams.fKd = kd;
-	                        osMutexRelease(mutexPIDParamsHandle);
-	                    }
-	                }
-	                else if (strcmp((char*)rxBuffer, "GET_PID") == 0)
-	                {
-	                    float kp, ki, kd;
-	                    if (osMutexAcquire(mutexPIDParamsHandle, pdMS_TO_TICKS(5)) == osOK)
-	                    {
-	                        kp = gvPIDParams.fKp;
-	                        ki = gvPIDParams.fKi;
-	                        kd = gvPIDParams.fKd;
-	                        osMutexRelease(mutexPIDParamsHandle);
-	                    }
-	                    snprintf(txBuffer, sizeof(txBuffer), "PID:%.2f %.2f %.2f\r\n", kp, ki, kd);
-	                    HAL_UART_Transmit(&hlpuart1, (uint8_t*)txBuffer, strlen(txBuffer), 100);
-	                }
-	                else if (strcmp((char*)rxBuffer, "MANUAL") == 0)
-	                {
-	                    uint8_t mode = MODE_MANUAL;
-	                    osMessageQueuePut(qTrocaModoHandle, &mode, 0, 0);
-	                }
-	                else if (strcmp((char*)rxBuffer, "AUTO") == 0)
-	                {
-	                    uint8_t mode = MODE_AUTONOMOUS;
-	                    osMessageQueuePut(qTrocaModoHandle, &mode, 0, 0);
-	                }
-	                else if (strncmp((char*)rxBuffer, "MOTOR ", 6) == 0)
-	                {
-	                    float left, right;
-	                    sscanf((char*)rxBuffer+6, "%f %f", &left, &right);
-	                    MotorCommand_t cmd = {left, right, 2}; // MANUAL
-	                    osMessageQueuePut(qMotorCommandHandle, &cmd, 0, 0);
-	                }
-	                else if (strcmp((char*)rxBuffer, "STOP") == 0)
-	                {
-	                    MotorCommand_t cmd = {0,0,0};
-	                    osMessageQueuePut(qMotorCommandHandle, &cmd, 0, 0);
-	                }
-	                rxIndex = 0;
+	                ucRxByte = gucBtRxRing[gusBtRxTail];
+	                gusBtRxTail = (uint16_t)((gusBtRxTail + 1U) % BT_RX_RING_SIZE);
+	                processByte(ucRxByte);
 	            }
-	            else if (rxIndex < sizeof(rxBuffer)-1)
+	            // Drena bytes da USART3
+	            while (gusBt3RxTail != gusBt3RxHead)
 	            {
-	                rxBuffer[rxIndex++] = ucRxByte;
+	                ucRxByte = gucBt3RxRing[gusBt3RxTail];
+	                gusBt3RxTail = (uint16_t)((gusBt3RxTail + 1U) % BT3_RX_RING_SIZE);
+	                processByte(ucRxByte);
 	            }
-	          } // while: drena buffer circular
 	        }
 
-	        // Envia telemetria a cada 1 segundo
+	        // Envia telemetria a cada 1 segundo pela USART3
 	        if ((xTaskGetTickCount() - xLastTelemetryTime) >= xTelemetryPeriod)
 	        {
 	            xLastTelemetryTime = xTaskGetTickCount();
@@ -923,7 +991,7 @@ void vStartTaskUART(void *argument)
 	                telemetrySnap.posX, telemetrySnap.posY, telemetrySnap.theta,
 	                telemetrySnap.speedCurrent, telemetrySnap.speedAverage, telemetrySnap.distTotal,
 	                telemetrySnap.batteryPct, telemetrySnap.systemMode, telemetrySnap.calibDone);
-	            HAL_UART_Transmit(&hlpuart1, (uint8_t*)txBuffer, strlen(txBuffer), 100);
+	            HAL_UART_Transmit(&huart3, (uint8_t*)txBuffer, strlen(txBuffer), 100);
 	        }
 	    }
 
@@ -942,27 +1010,40 @@ void vStartTaskLCD(void *argument)
   /* USER CODE BEGIN vStartTaskLCD */
 
 	    (void)argument;
-	    uint8_t lcdBuffer[32];
-	    const TickType_t xPeriod = pdMS_TO_TICKS(TASK_PERIOD_LCD);
+	    // Requisito funcional do LCD: exibir velocidade atual, distância percorrida,
+	    // coordenadas (x,y) e bateria (%), atualizando a 1 Hz. Lê a telemetria
+	    // diretamente (sob mutex) -> sempre o valor MAIS RECENTE, sem fila atrasando.
+	    //   Linha 1:  X:<x> Y:<y>            (metros)
+	    //   Linha 2:  V<vel> D<dist> B<bat>% (m/s, metros, %)
+	    char l1[17], l2[17];
+	    TelemetryData_t t = {0};   // zera p/ não exibir lixo se um acquire falhar
+	    int n;
+	    const TickType_t xPeriod = pdMS_TO_TICKS(TASK_PERIOD_LCD); // 1000 ms = 1 Hz
 	    TickType_t xLastWakeTime = xTaskGetTickCount();
 
 	    for(;;)
 	    {
 	        vTaskDelayUntil(&xLastWakeTime, xPeriod);
-	        if (osMessageQueueGet(qLCDDataHandle, lcdBuffer, NULL, 0) == osOK)
+
+	        // Snapshot atômico da telemetria
+	        if (osMutexAcquire(mutexTelemetryHandle, pdMS_TO_TICKS(20)) == osOK)
 	        {
-	            lcdSetCursorPosition(0, 0);
-	            lcdPrintStr(lcdBuffer, 16);
-	            lcdSetCursorPosition(0, 1);
-	            lcdPrintStr(lcdBuffer+16, 16);
+	            memcpy(&t, &gvTelemetry, sizeof(TelemetryData_t));
+	            osMutexRelease(mutexTelemetryHandle);
 	        }
-	        else
-	        {
-	            lcdSetCursorPosition(0, 0);
-	            lcdPrintStr((uint8_t*)"Robot Ready     ", 16);
-	            lcdSetCursorPosition(0, 1);
-	            lcdPrintStr((uint8_t*)"Mode: ?        ", 16);
-	        }
+
+	        // Monta as 2 linhas e completa com espaços até 16 col (lcdPrintStr manda
+	        // 16 bytes fixos; sem o padding sobraria lixo/null no fim da linha).
+	        n = snprintf(l1, sizeof(l1), "X:%+5.2f Y:%+5.2f", t.posX, t.posY);
+	        for (int i = (n < 0 ? 0 : n); i < 16; i++) l1[i] = ' ';
+	        n = snprintf(l2, sizeof(l2), "V%4.2f D%4.1fB%u%%",
+	                     t.speedCurrent, t.distTotal, t.batteryPct);
+	        for (int i = (n < 0 ? 0 : n); i < 16; i++) l2[i] = ' ';
+
+	        lcdSetCursorPosition(0, 0);
+	        lcdPrintStr((uint8_t*)l1, 16);
+	        lcdSetCursorPosition(0, 1);
+	        lcdPrintStr((uint8_t*)l2, 16);
 	    }
 
   /* USER CODE END vStartTaskLCD */
@@ -1022,8 +1103,16 @@ void vStartTaskTrocarModo(void *argument)
 	                    vTaskResume(vTaskCalibracaoHandle);
 	                    break;
 	                case BUTTONS_BUTTON_RIGHT:
-	                    // TESTE DE MOTOR: roda as duas rodas pra frente a 30%.
-	                    // Força MANUAL (p/ o seguir-linha não sobrescrever); DOWN para.
+	                    // Verifica se a emergência está ativa
+	                    if (osEventFlagsGet(evEmergencyHandle) & EMERGENCY_BIT) {
+	                        // Limpa a emergência
+	                        osEventFlagsClear(evEmergencyHandle, EMERGENCY_BIT);
+	                        // Apaga o LED de emergência (LD2) - opcional
+	                        HAL_GPIO_WritePin(LD2_GPIO_Port, LD2_Pin, GPIO_PIN_RESET);
+	                        // Não executa o teste de motor
+	                        break;
+	                    }
+	                    // Comportamento normal: TESTE DE MOTOR (roda para frente a 30%)
 	                    ucNewMode = MODE_MANUAL;
 	                    ucDoMotorTest = 1;
 	                    break;
@@ -1036,6 +1125,9 @@ void vStartTaskTrocarModo(void *argument)
 	        {
 	            ucCurrentMode = ucNewMode;
 	            gvSystemMode = ucCurrentMode;   // <- vTaskSegueLinha passa a (não) rodar o PID
+
+	            // LED vermelho indica o modo: ACESO em MANUAL, apagado em AUTOMÁTICO.
+	            LED_MANUAL_SET(ucCurrentMode == MODE_MANUAL);
 
 	            // SEGURANÇA: ao sair do modo AUTÔNOMO a vTaskSegueLinha deixa de enviar
 	            // comandos e o vTaskMotor manteria a ÚLTIMA velocidade aplicada (robô sai
@@ -1076,88 +1168,107 @@ void vStartTaskTrocarModo(void *argument)
 void vStartTaskUltrassonicBuzzer(void *argument)
 {
   /* USER CODE BEGIN vStartTaskUltrassonicBuzzer */
-	    (void)argument;
+    (void)argument;
 #if (ULTRASONIC_BUZZER_ENABLED == 0)
-	    // Subsistema ultrassom + buzzer DESABILITADO (foco no seguir-linha).
-	    // Garante o buzzer em silêncio e deixa a task ociosa. Totalmente reversível:
-	    // basta definir ULTRASONIC_BUZZER_ENABLED como 1 (no bloco USER CODE PD).
-	    __HAL_TIM_SET_COMPARE(&htim8, TIM_CHANNEL_1, 0);
-	    for(;;)
-	    {
-	        vTaskDelay(pdMS_TO_TICKS(1000));
-	    }
+    // Subsistema ultrassom + buzzer DESABILITADO (foco no seguir-linha).
+    __HAL_TIM_SET_COMPARE(&htim8, TIM_CHANNEL_1, 0);
+    for(;;)
+    {
+        vTaskDelay(pdMS_TO_TICKS(1000));
+    }
 #else
-	    // Abordagem escolhida: usa o driver distanceSensor.c (captura por DMA).
-	    // O trigger é gerado continuamente pelo PWM do TIM20 (configurado no init);
-	    // aqui apenas lemos a distância já calculada e acionamos o buzzer.
-	    const TickType_t xPeriod = pdMS_TO_TICKS(TASK_PERIOD_ULTRASONIC);
-	    TickType_t xLastWakeTime = xTaskGetTickCount();
-	    MotorCommand_t xStopCmd = {0.0f, 0.0f, 0};   // ucCmdType 0 = STOP
-	    float fDistance;
+    // Abordagem escolhida: usa o driver distanceSensor.c (captura por DMA).
+    const TickType_t xPeriod = pdMS_TO_TICKS(TASK_PERIOD_ULTRASONIC);
+    TickType_t xLastWakeTime = xTaskGetTickCount();
+    MotorCommand_t xStopCmd = {0.0f, 0.0f, 0};   // ucCmdType 0 = STOP
+    float fDistance;
 
-	    // Buzzer no TIM8_CH1: clock do timer = 170MHz/170 = 1 MHz (prescaler 170-1).
-	    // Frequência do tom = 1e6 / (ARR+1). Duty 50% => compare = (ARR+1)/2.
-	    const uint32_t ulBuzzerClkHz = 1000000UL;
+    // Buzzer no TIM8_CH1: clock do timer = 170MHz/170 = 1 MHz (prescaler 170-1).
+    const uint32_t ulBuzzerClkHz = 1000000UL;
 
-	    // Filtro de plausibilidade do ultrassom. A captura por DMA (BOTHEDGE, buffer
-	    // circular de 2 posições sobre o TIM3 livre) gera leituras espúrias entre ecos
-	    // e quando o sensor não está conectado, o que fazia o buzzer tocar sem parar.
-	    // Só acionamos o buzzer após ucUltraConfirm leituras CONSECUTIVAS dentro da
-	    // faixa válida; qualquer leitura fora/implausível zera a contagem.
-	    const float   fUltraMinCm    = 2.0f;    // < 2 cm = espúrio (mínimo do HC-SR04)
-	    const float   fUltraAlertCm  = 20.0f;   // distância em que começa a apitar
-	    const uint8_t ucUltraConfirm = 3U;      // leituras consecutivas p/ confirmar
-	    uint8_t       ucNearCount    = 0U;
+    // Parâmetros do ultrassom e do buzzer
+    const float   fUltraMinCm    = 2.0f;      // mínimo plausível (evita espúrios)
+    const float   fUltraAlertCm  = 20.0f;     // distância para começar a apitar
+    const float   fUltraMaxCm    = 400.0f;    // máximo plausível
+    const uint8_t ucUltraConfirm = 2U;        // amostras consecutivas para confirmar alerta
 
-	    for(;;)
-	    {
-	        vTaskDelayUntil(&xLastWakeTime, xPeriod);
+    // Filtro de média móvel com 20 amostras
+    #define       ULTRA_AVG_N   20U
+    float         fUltraBuf[ULTRA_AVG_N];
+    uint8_t       ucUltraIdx    = 0U;
+    uint8_t       ucUltraCnt    = 0U;         // quantas amostras já foram inseridas
+    uint8_t       ucNearCount   = 0U;         // contagem de amostras na zona de alerta
 
-	        fDistance = fDistanceSensorGetDistance();   // cm (driver DMA)
+    for(;;)
+    {
+        vTaskDelayUntil(&xLastWakeTime, xPeriod);
 
-	        // Leitura considerada "perto e válida"? Exige consistência antes de apitar.
-	        if (fDistance >= fUltraMinCm && fDistance < fUltraAlertCm)
-	        {
-	            if (ucNearCount < ucUltraConfirm) ucNearCount++;
-	        }
-	        else
-	        {
-	            ucNearCount = 0U;   // leitura fora da faixa -> mata o ruído do sensor
-	        }
+        // 1. Leitura crua do driver (cm)
+        float fRaw = fDistanceSensorGetDistance();
 
-	        uint16_t usFreq = 0;   // 0 = buzzer desligado
-	        if (ucNearCount >= ucUltraConfirm)
-	        {
-	            if (fDistance < STOP_DISTANCE_CM)
-	            {
-	                // Obstáculo muito próximo: parada imediata (prioridade na fila) + tom máximo
-	                osMessageQueuePut(qMotorCommandHandle, &xStopCmd, 1U, 0);
-	                usFreq = 2000;
-	            }
-	            else
-	            {
-	                // 20 cm -> 500 Hz ... 5 cm -> 2000 Hz (proporcional)
-	                usFreq = (uint16_t)(500.0f + (fUltraAlertCm - fDistance) *
-	                                    (1500.0f / (fUltraAlertCm - STOP_DISTANCE_CM)));
-	                if (usFreq > 2000) usFreq = 2000;
-	            }
-	        }
+        // 2. Substitui leituras inválidas por um valor alto (indica "longe")
+        if (fRaw < fUltraMinCm || fRaw > fUltraMaxCm) {
+            fRaw = fUltraMaxCm;
+        }
 
-	        if (usFreq == 0)
-	        {
-	            __HAL_TIM_SET_COMPARE(&htim8, TIM_CHANNEL_1, 0);   // silencia
-	        }
-	        else
-	        {
-	            uint32_t ulArr = (ulBuzzerClkHz / usFreq) - 1U;
-	            __HAL_TIM_SET_AUTORELOAD(&htim8, ulArr);
-	            __HAL_TIM_SET_COMPARE(&htim8, TIM_CHANNEL_1, (ulArr + 1U) / 2U); // 50% duty
-	        }
-	    }
+        // 3. Insere no buffer circular da média móvel
+        fUltraBuf[ucUltraIdx] = fRaw;
+        ucUltraIdx = (ucUltraIdx + 1U) % ULTRA_AVG_N;
+        if (ucUltraCnt < ULTRA_AVG_N) {
+            ucUltraCnt++;
+        }
+
+        // 4. Calcula a média (usa todas as amostras quando o buffer está cheio)
+        if (ucUltraCnt == ULTRA_AVG_N) {
+            float fSum = 0.0f;
+            for (uint8_t k = 0U; k < ULTRA_AVG_N; k++) {
+                fSum += fUltraBuf[k];
+            }
+            fDistance = fSum / (float)ULTRA_AVG_N;
+        } else {
+            // Ainda não encheu o buffer; média parcial
+            float fSum = 0.0f;
+            for (uint8_t k = 0U; k < ucUltraCnt; k++) {
+                fSum += fUltraBuf[k];
+            }
+            fDistance = fSum / (float)ucUltraCnt;
+        }
+
+        // 5. Verifica se a distância média está na zona de alerta
+        if (fDistance >= fUltraMinCm && fDistance < fUltraAlertCm) {
+            if (ucNearCount < ucUltraConfirm) ucNearCount++;
+        } else {
+            ucNearCount = 0U;   // zera imediatamente ao sair da zona
+        }
+
+        // 6. Decisão do buzzer e parada de emergência
+        uint16_t usFreq = 0;   // 0 = buzzer desligado
+        if (ucNearCount >= ucUltraConfirm) {
+            if (fDistance < STOP_DISTANCE_CM) {
+                // Obstáculo muito próximo: parada imediata + tom máximo
+                osMessageQueuePut(qMotorCommandHandle, &xStopCmd, 1U, 0);
+                usFreq = 2000;
+            } else {
+                // Frequência proporcional à distância (20cm->500Hz, 5cm->2000Hz)
+                usFreq = (uint16_t)(500.0f + (fUltraAlertCm - fDistance) *
+                                    (1500.0f / (fUltraAlertCm - STOP_DISTANCE_CM)));
+                if (usFreq > 2000) usFreq = 2000;
+            }
+        }
+
+        // 7. Aplica a frequência no buzzer (TIM8_CH1)
+        if (usFreq == 0) {
+            __HAL_TIM_SET_COMPARE(&htim8, TIM_CHANNEL_1, 0);
+        } else {
+            uint32_t ulArr = (ulBuzzerClkHz / usFreq) - 1U;
+            __HAL_TIM_SET_AUTORELOAD(&htim8, ulArr);
+            __HAL_TIM_SET_COMPARE(&htim8, TIM_CHANNEL_1, (ulArr + 1U) / 10U);
+        }
+    }
 #endif /* ULTRASONIC_BUZZER_ENABLED */
-
   /* USER CODE END vStartTaskUltrassonicBuzzer */
 }
+
 
 /* Private application code --------------------------------------------------*/
 /* USER CODE BEGIN Application */
@@ -1167,25 +1278,23 @@ void vStartTaskUltrassonicBuzzer(void *argument)
 /* ========================================================================== */
 
 /**
- * @brief Captura dos timers: encoders (I3/I4) e eco do ultrassônico (I6).
- * @note  Chamada pela HAL dentro do IRQ do timer correspondente.
- */
+	 * @brief Handles timer input capture events.
+	 * @details This callback is called by the HAL whenever an input capture
+	 * event occurs. It must forward the capture event to the motor encoder
+	 * module according to the timer that generated the callback.
+	 * @param htim Timer handle that generated the callback.
+	 */
 void HAL_TIM_IC_CaptureCallback(TIM_HandleTypeDef *htim)
 {
-    if (htim->Instance == TIM16)        // I3: encoder roda esquerda (Encoder_Esq_TIM / PB4)
-    {
-        gvEncoderCounts[0]++;           // escrita de 32 bits é atômica no Cortex-M4
-    }
-    else if (htim->Instance == TIM17)   // I4: encoder roda direita (Encoder_Dir_TIM / PB5)
-    {
-        gvEncoderCounts[1]++;
-    }
-    else if (htim->Instance == TIM3)    // I6: eco do HC-SR04 (echo capture)
-    {
-        // O driver distanceSensor.c captura via DMA. Quando migrar para a leitura
-        // por semáforo (modelo I6), grave aqui g_ultrasonicEchoTicks e libere:
-        //   osSemaphoreRelease(semUltrassonicHandle);
-    }
+	  if (&htim17 == htim) {
+	    vMotorEncoderHandleTimerCapture(MOTORENCODER_MOTOR_RIGHT);
+	    gvEncoderCounts[1]++;
+
+	  } else if (&htim16 == htim) {
+	    vMotorEncoderHandleTimerCapture(MOTORENCODER_MOTOR_LEFT);
+	    gvEncoderCounts[0]++;
+	  }
+
 }
 
 /**
@@ -1193,15 +1302,15 @@ void HAL_TIM_IC_CaptureCallback(TIM_HandleTypeDef *htim)
  */
 void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
 {
-    /* I1 - bumper frontal: parada de emergência (<10 ms).
-     * Requer configurar PD2 (Switch_Fr) como EXTI na IOC. Quando existir:
-     *   if (GPIO_Pin == Switch_Fr_Pin) {
-     *       osEventFlagsSet(evEmergencyHandle, EMERGENCY_BIT);
-     *       return;
-     *   }
-     */
+    if (GPIO_Pin == Switch_Fr_Pin) {
+        // Verifica se o pino realmente está no estado ativo (ex: nível baixo)
+        if (HAL_GPIO_ReadPin(Switch_Fr_GPIO_Port, Switch_Fr_Pin) == GPIO_PIN_RESET) {
+        	HAL_GPIO_WritePin(LD2_GPIO_Port, LD2_Pin, 1);
+            osEventFlagsSet(evEmergencyHandle, EMERGENCY_BIT);
+        }
+        return;
+    }
 
-    /* I5 - botões: inicia o debounce (buttons.c cuida da validação no TIM7) */
     vButtonsDebouncingStart(GPIO_Pin);
 }
 
@@ -1217,22 +1326,60 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
         osSemaphoreRelease(semBTRxReadyHandle);   // conta 1 byte disponível
         HAL_UART_Receive_IT(huart, &gucBtRxByte, 1); // re-arma a próxima recepção
     }
+    else if (huart->Instance == USART3)
+    {
+        gucBt3RxRing[gusBt3RxHead] = gucBt3RxByte;
+        gusBt3RxHead = (uint16_t)((gusBt3RxHead + 1U) % BT3_RX_RING_SIZE);
+        osSemaphoreRelease(semBTRxReadyHandle);  // mesmo semáforo pode ser usado
+        HAL_UART_Receive_IT(huart, &gucBt3RxByte, 1);
+    }
 }
 
 /* ========================================================================== */
 /*  Callbacks de botão (I5): chamados por vButtonsDebouncingStop (ISR TIM7)    */
 /*  postam o evento validado em qButtonsEvent (consumido por vTaskTrocarModo). */
 /* ========================================================================== */
+
+/**
+ * @brief Handles stable button press events.
+ * @details This callback is called by the buttons module after the
+ * debounce interval expires and a valid stable press is confirmed.
+ * It updates the motor setpoints according to the pressed button.
+ * @param xButton Button that was pressed.
+ */
 void vButtonsPressedCallback(buttonsEnum_t xButton)
 {
-    ButtonEvent_t xEvent = { (uint8_t)xButton, 0U }; // 0 = PRESS
+    ButtonEvent_t xEvent = { (uint8_t)xButton, 0U }; // PRESS
     osMessageQueuePut(qButtonsEventHandle, &xEvent, 0, 0);
 }
 
 void vButtonsReleasedCallback(buttonsEnum_t xButton)
 {
-    ButtonEvent_t xEvent = { (uint8_t)xButton, 1U }; // 1 = RELEASE
+    ButtonEvent_t xEvent = { (uint8_t)xButton, 1U }; // RELEASE
     osMessageQueuePut(qButtonsEventHandle, &xEvent, 0, 0);
+}
+/**
+ * @brief Handles timer period elapsed events.
+ * @details This callback is called by the HAL whenever a timer update
+ * event occurs. It must forward the encoder timer overflow events to
+ * the motor encoder module, execute the motor control loop on TIM6, and
+ * stop the button debounce process when TIM7 expires.
+ * @param htim Timer handle that generated the callback.
+ */
+void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
+{
+    if (&htim17 == htim) {
+        vMotorEncoderHandleTimerReset(MOTORENCODER_MOTOR_RIGHT);
+    } else if (&htim16 == htim) {
+        vMotorEncoderHandleTimerReset(MOTORENCODER_MOTOR_LEFT);
+    } else if (&htim7 == htim) {
+        vButtonsDebouncingStop();
+    }
+    if (htim->Instance == TIM2) {
+        HAL_IncTick();
+        return;
+    }
+    // Remove todo o bloco do TIM6
 }
 
 /* USER CODE END Application */

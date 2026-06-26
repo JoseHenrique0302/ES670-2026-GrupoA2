@@ -158,6 +158,12 @@ void vButtonsDebouncingStart(uint16_t usButtonPin) {
   }
 
   __HAL_TIM_SET_COUNTER(pButtonsTimerHandler, 0U);
+  /* Limpa um eventual UIF pendente antes de armar a IT: sem isto, o
+   * HAL_TIM_Base_Start_IT dispara uma interrupcao de update IMEDIATA (t~0),
+   * fazendo o vButtonsDebouncingStop validar antes da janela de debounce e
+   * descartar o aperto. Como o timer e' usado on-demand (start aqui / stop na
+   * validacao), todo start e' "frio", entao a limpeza tem que ser por aperto. */
+  __HAL_TIM_CLEAR_FLAG(pButtonsTimerHandler, TIM_FLAG_UPDATE);
   HAL_TIM_Base_Start_IT(pButtonsTimerHandler);
 }
 

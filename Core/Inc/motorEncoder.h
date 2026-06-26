@@ -145,5 +145,17 @@ void vMotorEncoderHandleTimerReset(motorEncoderMotor_t xMotor);
  */
 void vMotorEncoderHandleTimerCapture(motorEncoderMotor_t xMotor);
 
+/**
+ * @brief Reads the accumulated distance of one motor.
+ * @param xMotor Selected motor.
+ * @return Distance in centimeters.
+ */
+float fMotorEncoderReadDistance(motorEncoderMotor_t xMotor);
+
+/**
+ * @brief Resets the accumulated distance of one motor.
+ * @param xMotor Selected motor.
+ */
+void vMotorEncoderResetDistance(motorEncoderMotor_t xMotor);
 
 #endif // MOTORENCODER_H
