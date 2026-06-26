@@ -690,7 +690,7 @@ void vStartTaskSegueLinha(void *argument)
 	    const int8_t cWeights[5] = {-2, -1, 0, 1, 2};
 
 	    // Parâmetros do controle de seguimento (ajustáveis)
-	    const float fBaseSpeed   = 0.60f;   // duty base (0..1) das rodas
+	    const float fBaseSpeed   = 0.40f;   // duty base (0..1) das rodas
 	    const float fTurnLimit   = 0.90f;   // limite de correção (mantém duty >= 0)
 	    const float fIntegralMax = 50.0f;   // anti-windup do integrador
 
@@ -751,7 +751,7 @@ void vStartTaskSegueLinha(void *argument)
 	            fError = (fLastError >= 0.0f) ? 2.0f : -2.0f;
 
 	        // Ganhos PID atuais (ajustáveis por Bluetooth via mutexPIDParams)
-	        float fKp = 0.5f, fKi = 0.1f, fKd = 0.0f;
+	        float fKp = 0.04f, fKi = 0.01f, fKd = 0.0f;
 	        if (osMutexAcquire(mutexPIDParamsHandle, pdMS_TO_TICKS(5)) == osOK)
 	        {
 	            fKp = gvPIDParams.fKp;
@@ -771,8 +771,8 @@ void vStartTaskSegueLinha(void *argument)
 	        if (fTurn >  fTurnLimit) fTurn =  fTurnLimit;
 	        if (fTurn < -fTurnLimit) fTurn = -fTurnLimit;
 
-	        xCmd.fSpeedLeft  = fBaseSpeed + fTurn;
-	        xCmd.fSpeedRight = fBaseSpeed - fTurn;
+	        xCmd.fSpeedLeft  = fBaseSpeed - fTurn;
+	        xCmd.fSpeedRight = fBaseSpeed + fTurn;
 	        if (xCmd.fSpeedLeft  < 0.0f) xCmd.fSpeedLeft  = 0.0f;
 	        if (xCmd.fSpeedLeft  > 1.0f) xCmd.fSpeedLeft  = 1.0f;
 	        if (xCmd.fSpeedRight < 0.0f) xCmd.fSpeedRight = 0.0f;
