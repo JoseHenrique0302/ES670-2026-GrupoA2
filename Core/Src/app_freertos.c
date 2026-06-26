@@ -155,17 +155,14 @@ typedef struct {
 // pull-up/down no PD2 na IOC e validar a chave.
 #define BUMPER_EMERGENCY_ENABLED    1
 
-// DEBUG no LCD: em 1, a task de odometria transforma o LCD num painel de
-// diagnostico que GIRA sozinho a cada ~2,5 s (sem precisar de botao/debugger),
-// cobrindo os principais subsistemas. Em 0, o LCD volta ao normal (X/Y + Th/V).
-// Paginas:
-//   0 ENC : "L:<esq> R:<dir>"   contagem bruta dos encoders | X/Y
-//   1 IR  : "IR a b c d e"      binarizacao dos 5 sensores  | Bateria %% + raw
-//   2 SYS : "Mode:<0/1> Cal"    modo/calibracao             | ultimo botao + total
-//   3 BT  : "Th/V"              pose theta/velocidade        | bytes recebidos via BT
-// Use para testar TUDO: gire as rodas (pag0), passe a linha sob os IR (pag1),
-// aperte botoes (pag2), envie comando pelo app (pag3 BTrx sobe).
-#define ODOMETRY_LCD_RAW_DEBUG       1
+// LEDs RGB no TIM4 (PWM, ARR=999). Usados como indicadores:
+//   - Vermelho (CH1, PA11): aceso em modo MANUAL, apagado em AUTOMÁTICO.
+//   - Azul     (CH3, PB8) : aceso enquanto a calibração está em andamento.
+// Aceso=999, apagado=0. (Se a placa for ativa-baixa, troque LED_ON/LED_OFF.)
+#define LED_ON   999
+#define LED_OFF  0
+#define LED_MANUAL_SET(on)  __HAL_TIM_SET_COMPARE(&htim4, TIM_CHANNEL_1, (on) ? LED_ON : LED_OFF)
+#define LED_CALIB_SET(on)   __HAL_TIM_SET_COMPARE(&htim4, TIM_CHANNEL_3, (on) ? LED_ON : LED_OFF)
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -186,25 +183,13 @@ static volatile uint32_t g_ultrasonicEchoTicks = 0;    // GV4: tempo do eco em t
 extern I2C_HandleTypeDef hi2c2;
 
 // Handles dos timers e UART (gerados pelo CubeMX)
-extern TIM_HandleTypeDef htim1, htim8, htim16, htim17, htim20, htim3, htim7;
+extern TIM_HandleTypeDef htim1, htim8, htim16, htim17, htim20, htim3, htim7, htim4;
 extern UART_HandleTypeDef hlpuart1;
 extern UART_HandleTypeDef huart3;
 
 // Modo atual do sistema (escrito por vTaskTrocarModo, lido por vTaskSegueLinha).
 // 1 byte -> escrita/leitura atômica no Cortex-M4; dispensa mutex.
 static volatile uint8_t gvSystemMode = MODE_MANUAL;
-
-// --- Snapshots de DEBUG (escritos pelas tasks/ISRs donas, lidos pela odometria
-//     para o LCD multi-pagina; ver DEBUG_LCD). Todos baratos e atomicos o bastante
-//     para diagnostico; nao precisam de mutex. ---
-static volatile uint8_t  g_dbgIR[5]     = {0,0,0,0,0}; // binarizacao IR (vTaskSegueLinha)
-static volatile uint16_t g_dbgBatRaw    = 0;           // ADC bruto bateria (vTaskSegueLinha)
-static volatile uint8_t  g_dbgLastBtnId = 255;         // ultimo botao (callback de botao)
-static volatile uint32_t g_dbgBtnCount  = 0;           // total de apertos validados
-static volatile uint32_t g_dbgBtRxCount = 0;           // bytes recebidos via USART3 (BT)
-static volatile uint8_t  g_dbgLcdPage   = 0;           // pagina atual do painel DEBUG_LCD
-                                                        // (avança a cada APERTO de botão -
-                                                        //  troca manual, sem rotação por tempo)
 
 // Buffer circular de recepção da UART: a ISR (I2) escreve o byte e libera
 // semBTRxReady; vTaskUART (T7) drena o buffer e faz o parsing dos comandos.
@@ -426,6 +411,13 @@ void MX_FREERTOS_Init(void) {
     //  TIM7 a cada debounce; deixá-lo livre desde o boot atrapalhava os botões.)
     __HAL_TIM_SET_COMPARE(&htim8, TIM_CHANNEL_1, 0);
 
+    // LEDs indicadores no TIM4: vermelho (CH1, modo) e azul (CH3, calibração).
+    // Começa com vermelho ACESO (boot em MANUAL) e azul apagado.
+    HAL_TIM_PWM_Start(&htim4, TIM_CHANNEL_1);
+    HAL_TIM_PWM_Start(&htim4, TIM_CHANNEL_3);
+    LED_MANUAL_SET(1);
+    LED_CALIB_SET(0);
+
     // Botões (debounce por software usando o TIM7). Ordem: Up, Right, Left, Down, Enter
     ucButtonsInit(BT_Cima_GPIO_Port,  BT_Cima_Pin,
                   BT_Dir_GPIO_Port,   BT_Dir_Pin,
@@ -592,15 +584,25 @@ void vStartTaskCalibration(void *argument)
 	    {
 	        vTaskSuspend(NULL);   // aguarda ser resumida por T7
 
+	        // LED azul ACESO sinaliza calibração em andamento -> o operador sabe
+	        // a hora de deslizar o robô cruzando a linha (preto e branco) para o
+	        // driver capturar o min/max de cada sensor.
+	        LED_CALIB_SET(1);
+
 	        // Reseta e atualiza calibração. O driver v2 guarda min/max de cada
 	        // sensor internamente; a normalização (fLineSensors_v2_GetSensorValue)
 	        // já usa esses limites, então não há limiar a calcular aqui.
+	        // 3 s de janela (300 x 10 ms): tempo para passar a barra de sensores
+	        // sobre a linha. Os 200 ms antigos nem davam para mover o robô, entao
+	        // a calibração não capturava o contraste (ficava "feita" só no nome).
 	        vLineSensors_v2_ResetCalibration();
-	        for (int i = 0; i < 20; i++)   // 200ms de amostragem
+	        for (int i = 0; i < 300; i++)
 	        {
 	            vLineSensors_v2_UpdateCalibration();
 	            vTaskDelay(pdMS_TO_TICKS(10));
 	        }
+
+	        LED_CALIB_SET(0);   // fim da calibração -> apaga o azul
 
 	        // Atualiza flag na telemetria
 	        if (osMutexAcquire(mutexTelemetryHandle, pdMS_TO_TICKS(100)) == osOK)
@@ -710,16 +712,9 @@ void vStartTaskSegueLinha(void *argument)
 	        for (int i = 0; i < 5; i++)
 	            ucIRBin[i] = (fLineSensors_v2_GetSensorValue((lineSensorsEnum_t)i) > 0.5f) ? 1U : 0U;
 
-#if (DEBUG_LCD != 0)
-	        for (int i = 0; i < 5; i++) g_dbgIR[i] = ucIRBin[i];   // snapshot p/ pagina IR
-#endif
-
 	        /* ---- 2) Bateria + parada de emergência por subtensão (sempre) ---- */
 	        uint16_t usBatteryRaw = usBatteryGetRawValue();
 	        uint8_t  ucBatteryPct = (uint8_t)usBatteryGetCharge();
-#if (DEBUG_LCD != 0)
-	        g_dbgBatRaw = usBatteryRaw;                            // snapshot p/ pagina IR/Bat
-#endif
 	        if (osMutexAcquire(mutexTelemetryHandle, pdMS_TO_TICKS(5)) == osOK)
 	        {
 	            gvTelemetry.batteryPct = ucBatteryPct;
@@ -815,10 +810,6 @@ void vStartTaskOdometria(void *argument)
     static float fSpeedSum = 0.0f;
     static int speedCount = 0;
 
-    // Buffers para o LCD
-    char lcdLine1[17], lcdLine2[17];
-    uint8_t lcdBuffer[32];
-
   /* Infinite loop */
   for(;;)
   {
@@ -870,42 +861,9 @@ void vStartTaskOdometria(void *argument)
           osMutexRelease(mutexTelemetryHandle);
       }
 
-      // 5. Envia dados para o LCD (via fila)
-#if (DEBUG_LCD != 0)
-      // Painel de diagnostico: 4 paginas, troca MANUAL a cada aperto de botao
-//      // (ver g_dbgLcdPage, incrementado em vButtonsPressedCallback).
-//      uint8_t ucPage = g_dbgLcdPage;
-//      switch (ucPage)
-//      {
-//          case 0: // ENCODERS (gire as rodas a mao: L/R devem subir) | pose X/Y
-//              snprintf(lcdLine1, 17, "L%-6ld R%-6ld", (long)leftCount, (long)rightCount);
-//              snprintf(lcdLine2, 17, "X:%4.1f Y:%4.1f", gvTelemetry.posX, gvTelemetry.posY);
-//              break;
-//          case 1: // SENSORES IR (binarizados) | bateria %% + ADC bruto
-//              snprintf(lcdLine1, 17, "IR %u %u %u %u %u",
-//                       g_dbgIR[0], g_dbgIR[1], g_dbgIR[2], g_dbgIR[3], g_dbgIR[4]);
-//              snprintf(lcdLine2, 17, "Bat:%3u%% raw%4u",
-//                       gvTelemetry.batteryPct, g_dbgBatRaw);
-//              break;
-//          case 2: // MODO/CALIBRACAO | ultimo botao (id) + total de apertos
-//              snprintf(lcdLine1, 17, "Mode:%u Cal:%u",
-//                       gvTelemetry.systemMode, gvTelemetry.calibDone);
-//              snprintf(lcdLine2, 17, "Btn:%3u n:%4lu",
-//                       g_dbgLastBtnId, (unsigned long)g_dbgBtnCount);
-//              break;
-//          default: // BLUETOOTH/pose | bytes recebidos via USART3 (sobe ao enviar do app)
-//              snprintf(lcdLine1, 17, "Th:%5.2f V:%4.2f",
-//                       gvTelemetry.theta, gvTelemetry.speedCurrent);
-//              snprintf(lcdLine2, 17, "BTrx:%-9lu", (unsigned long)g_dbgBtRxCount);
-//              break;
-//     }
-#else
-      snprintf(lcdLine1, 17, "X:%4.1f Y:%4.1f", gvTelemetry.posX, gvTelemetry.posY);
-      snprintf(lcdLine2, 17, "Th:%4.1f V:%4.1f", gvTelemetry.theta, gvTelemetry.speedCurrent);
-#endif
-      memcpy(lcdBuffer, lcdLine1, 16);
-      memcpy(lcdBuffer + 16, lcdLine2, 16);
-      osMessageQueuePut(qLCDDataHandle, lcdBuffer, 0, 0);
+      // A exibição no LCD foi movida para a vTaskLCD (lê gvTelemetry sob mutex e
+      // formata a 1 Hz). Assim a odometria só integra a pose e não há mais a fila
+      // do LCD enchendo (20 Hz de push vs 1 Hz de leitura) que mostrava dado velho.
   }
 
 
@@ -1052,27 +1010,40 @@ void vStartTaskLCD(void *argument)
   /* USER CODE BEGIN vStartTaskLCD */
 
 	    (void)argument;
-	    uint8_t lcdBuffer[32];
-	    const TickType_t xPeriod = pdMS_TO_TICKS(TASK_PERIOD_LCD);
+	    // Requisito funcional do LCD: exibir velocidade atual, distância percorrida,
+	    // coordenadas (x,y) e bateria (%), atualizando a 1 Hz. Lê a telemetria
+	    // diretamente (sob mutex) -> sempre o valor MAIS RECENTE, sem fila atrasando.
+	    //   Linha 1:  X:<x> Y:<y>            (metros)
+	    //   Linha 2:  V<vel> D<dist> B<bat>% (m/s, metros, %)
+	    char l1[17], l2[17];
+	    TelemetryData_t t = {0};   // zera p/ não exibir lixo se um acquire falhar
+	    int n;
+	    const TickType_t xPeriod = pdMS_TO_TICKS(TASK_PERIOD_LCD); // 1000 ms = 1 Hz
 	    TickType_t xLastWakeTime = xTaskGetTickCount();
 
 	    for(;;)
 	    {
 	        vTaskDelayUntil(&xLastWakeTime, xPeriod);
-	        if (osMessageQueueGet(qLCDDataHandle, lcdBuffer, NULL, 0) == osOK)
+
+	        // Snapshot atômico da telemetria
+	        if (osMutexAcquire(mutexTelemetryHandle, pdMS_TO_TICKS(20)) == osOK)
 	        {
-	            lcdSetCursorPosition(0, 0);
-	            lcdPrintStr(lcdBuffer, 16);
-	            lcdSetCursorPosition(0, 1);
-	            lcdPrintStr(lcdBuffer+16, 16);
+	            memcpy(&t, &gvTelemetry, sizeof(TelemetryData_t));
+	            osMutexRelease(mutexTelemetryHandle);
 	        }
-	        else
-	        {
-	            lcdSetCursorPosition(0, 0);
-	            lcdPrintStr((uint8_t*)"Robot Ready     ", 16);
-	            lcdSetCursorPosition(0, 1);
-	            lcdPrintStr((uint8_t*)"Mode: ?        ", 16);
-	        }
+
+	        // Monta as 2 linhas e completa com espaços até 16 col (lcdPrintStr manda
+	        // 16 bytes fixos; sem o padding sobraria lixo/null no fim da linha).
+	        n = snprintf(l1, sizeof(l1), "X:%+5.2f Y:%+5.2f", t.posX, t.posY);
+	        for (int i = (n < 0 ? 0 : n); i < 16; i++) l1[i] = ' ';
+	        n = snprintf(l2, sizeof(l2), "V%4.2f D%4.1fB%u%%",
+	                     t.speedCurrent, t.distTotal, t.batteryPct);
+	        for (int i = (n < 0 ? 0 : n); i < 16; i++) l2[i] = ' ';
+
+	        lcdSetCursorPosition(0, 0);
+	        lcdPrintStr((uint8_t*)l1, 16);
+	        lcdSetCursorPosition(0, 1);
+	        lcdPrintStr((uint8_t*)l2, 16);
 	    }
 
   /* USER CODE END vStartTaskLCD */
@@ -1147,6 +1118,9 @@ void vStartTaskTrocarModo(void *argument)
 	            ucCurrentMode = ucNewMode;
 	            gvSystemMode = ucCurrentMode;   // <- vTaskSegueLinha passa a (não) rodar o PID
 
+	            // LED vermelho indica o modo: ACESO em MANUAL, apagado em AUTOMÁTICO.
+	            LED_MANUAL_SET(ucCurrentMode == MODE_MANUAL);
+
 	            // SEGURANÇA: ao sair do modo AUTÔNOMO a vTaskSegueLinha deixa de enviar
 	            // comandos e o vTaskMotor manteria a ÚLTIMA velocidade aplicada (robô sai
 	            // andando). Envia um STOP explícito para garantir que o robô pare de fato.
@@ -1219,11 +1193,39 @@ void vStartTaskUltrassonicBuzzer(void *argument)
 	    const uint8_t ucUltraConfirm = 3U;      // leituras consecutivas p/ confirmar
 	    uint8_t       ucNearCount    = 0U;
 
+	    // FILTRO: média móvel das últimas ULTRA_AVG_N leituras VÁLIDAS. Sem isto, a
+	    // distância oscila ciclo a ciclo e a frequência do buzzer fica pulando. Só
+	    // entram na média leituras plausíveis (2..400 cm); espúrias são descartadas.
+	    const float   fUltraMaxCm   = 400.0f;
+	    #define       ULTRA_AVG_N   8U
+	    float         fUltraBuf[ULTRA_AVG_N];
+	    uint8_t       ucUltraIdx    = 0U;
+	    uint8_t       ucUltraCnt    = 0U;
+
 	    for(;;)
 	    {
 	        vTaskDelayUntil(&xLastWakeTime, xPeriod);
 
-	        fDistance = fDistanceSensorGetDistance();   // cm (driver DMA)
+	        // Leitura crua do driver (cm); só entra na média se for plausível.
+	        float fRaw = fDistanceSensorGetDistance();
+	        if (fRaw >= fUltraMinCm && fRaw <= fUltraMaxCm)
+	        {
+	            fUltraBuf[ucUltraIdx] = fRaw;
+	            ucUltraIdx = (uint8_t)((ucUltraIdx + 1U) % ULTRA_AVG_N);
+	            if (ucUltraCnt < ULTRA_AVG_N) ucUltraCnt++;
+	        }
+	        // fDistance = média das leituras válidas acumuladas (suave). Sem nenhuma
+	        // leitura válida ainda -> trata como "longe" (buzzer desligado).
+	        if (ucUltraCnt > 0U)
+	        {
+	            float fSum = 0.0f;
+	            for (uint8_t k = 0U; k < ucUltraCnt; k++) fSum += fUltraBuf[k];
+	            fDistance = fSum / (float)ucUltraCnt;
+	        }
+	        else
+	        {
+	            fDistance = fUltraAlertCm;
+	        }
 
 	        // Leitura considerada "perto e válida"? Exige consistência antes de apitar.
 	        if (fDistance >= fUltraMinCm && fDistance < fUltraAlertCm)
@@ -1330,9 +1332,6 @@ void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
         gucBt3RxRing[gusBt3RxHead] = gucBt3RxByte;
         gusBt3RxHead = (uint16_t)((gusBt3RxHead + 1U) % BT3_RX_RING_SIZE);
         osSemaphoreRelease(semBTRxReadyHandle);  // mesmo semáforo pode ser usado
-#if (DEBUG_LCD != 0)
-        g_dbgBtRxCount++;                        // pagina BT: prova que chega byte do app
-#endif
         HAL_UART_Receive_IT(huart, &gucBt3RxByte, 1);
     }
 }
