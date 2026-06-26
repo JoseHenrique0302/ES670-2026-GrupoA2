@@ -596,7 +596,7 @@ void vStartTaskCalibration(void *argument)
 	        // sobre a linha. Os 200 ms antigos nem davam para mover o robô, entao
 	        // a calibração não capturava o contraste (ficava "feita" só no nome).
 	        vLineSensors_v2_ResetCalibration();
-	        for (int i = 0; i < 300; i++)
+	        for (int i = 0; i < 1000; i++)
 	        {
 	            vLineSensors_v2_UpdateCalibration();
 	            vTaskDelay(pdMS_TO_TICKS(10));
@@ -690,8 +690,8 @@ void vStartTaskSegueLinha(void *argument)
 	    const int8_t cWeights[5] = {-2, -1, 0, 1, 2};
 
 	    // Parâmetros do controle de seguimento (ajustáveis)
-	    const float fBaseSpeed   = 0.40f;   // duty base (0..1) das rodas
-	    const float fTurnLimit   = 0.40f;   // limite de correção (mantém duty >= 0)
+	    const float fBaseSpeed   = 0.60f;   // duty base (0..1) das rodas
+	    const float fTurnLimit   = 0.90f;   // limite de correção (mantém duty >= 0)
 	    const float fIntegralMax = 50.0f;   // anti-windup do integrador
 
 	    // Estado do PID de linha (saída SIMÉTRICA: vira p/ esquerda e direita)
@@ -725,8 +725,8 @@ void vStartTaskSegueLinha(void *argument)
 	        // comparava com 5500mV -> a condição era SEMPRE verdadeira, a emergência
 	        // ligava no 1º ciclo e os motores NUNCA rodavam. O guard usBatteryRaw>100
 	        // evita falso disparo no boot, antes do ADC/DMA converter (leitura ~0).
-//	        if (usBatteryRaw > 100U && ucBatteryPct < BATTERY_MIN_PCT)
-//	            osEventFlagsSet(evEmergencyHandle, EMERGENCY_BIT);
+	        if (usBatteryRaw > 100U && ucBatteryPct < BATTERY_MIN_PCT)
+	            osEventFlagsSet(evEmergencyHandle, EMERGENCY_BIT);
 
 	        /* ---- 3) Controle de linha: só no modo AUTÔNOMO ---- */
 	        if (gvSystemMode != MODE_AUTONOMOUS)
@@ -751,7 +751,7 @@ void vStartTaskSegueLinha(void *argument)
 	            fError = (fLastError >= 0.0f) ? 2.0f : -2.0f;
 
 	        // Ganhos PID atuais (ajustáveis por Bluetooth via mutexPIDParams)
-	        float fKp = 0.1f, fKi = 0.01f, fKd = 0.0f;
+	        float fKp = 0.5f, fKi = 0.1f, fKd = 0.0f;
 	        if (osMutexAcquire(mutexPIDParamsHandle, pdMS_TO_TICKS(5)) == osOK)
 	        {
 	            fKp = gvPIDParams.fKp;
@@ -1103,8 +1103,16 @@ void vStartTaskTrocarModo(void *argument)
 	                    vTaskResume(vTaskCalibracaoHandle);
 	                    break;
 	                case BUTTONS_BUTTON_RIGHT:
-	                    // TESTE DE MOTOR: roda as duas rodas pra frente a 30%.
-	                    // Força MANUAL (p/ o seguir-linha não sobrescrever); DOWN para.
+	                    // Verifica se a emergência está ativa
+	                    if (osEventFlagsGet(evEmergencyHandle) & EMERGENCY_BIT) {
+	                        // Limpa a emergência
+	                        osEventFlagsClear(evEmergencyHandle, EMERGENCY_BIT);
+	                        // Apaga o LED de emergência (LD2) - opcional
+	                        HAL_GPIO_WritePin(LD2_GPIO_Port, LD2_Pin, GPIO_PIN_RESET);
+	                        // Não executa o teste de motor
+	                        break;
+	                    }
+	                    // Comportamento normal: TESTE DE MOTOR (roda para frente a 30%)
 	                    ucNewMode = MODE_MANUAL;
 	                    ucDoMotorTest = 1;
 	                    break;
@@ -1160,116 +1168,107 @@ void vStartTaskTrocarModo(void *argument)
 void vStartTaskUltrassonicBuzzer(void *argument)
 {
   /* USER CODE BEGIN vStartTaskUltrassonicBuzzer */
-	    (void)argument;
+    (void)argument;
 #if (ULTRASONIC_BUZZER_ENABLED == 0)
-	    // Subsistema ultrassom + buzzer DESABILITADO (foco no seguir-linha).
-	    // Garante o buzzer em silêncio e deixa a task ociosa. Totalmente reversível:
-	    // basta definir ULTRASONIC_BUZZER_ENABLED como 1 (no bloco USER CODE PD).
-	    __HAL_TIM_SET_COMPARE(&htim8, TIM_CHANNEL_1, 0);
-	    for(;;)
-	    {
-	        vTaskDelay(pdMS_TO_TICKS(1000));
-	    }
+    // Subsistema ultrassom + buzzer DESABILITADO (foco no seguir-linha).
+    __HAL_TIM_SET_COMPARE(&htim8, TIM_CHANNEL_1, 0);
+    for(;;)
+    {
+        vTaskDelay(pdMS_TO_TICKS(1000));
+    }
 #else
-	    // Abordagem escolhida: usa o driver distanceSensor.c (captura por DMA).
-	    // O trigger é gerado continuamente pelo PWM do TIM20 (configurado no init);
-	    // aqui apenas lemos a distância já calculada e acionamos o buzzer.
-	    const TickType_t xPeriod = pdMS_TO_TICKS(TASK_PERIOD_ULTRASONIC);
-	    TickType_t xLastWakeTime = xTaskGetTickCount();
-	    MotorCommand_t xStopCmd = {0.0f, 0.0f, 0};   // ucCmdType 0 = STOP
-	    float fDistance;
+    // Abordagem escolhida: usa o driver distanceSensor.c (captura por DMA).
+    const TickType_t xPeriod = pdMS_TO_TICKS(TASK_PERIOD_ULTRASONIC);
+    TickType_t xLastWakeTime = xTaskGetTickCount();
+    MotorCommand_t xStopCmd = {0.0f, 0.0f, 0};   // ucCmdType 0 = STOP
+    float fDistance;
 
-	    // Buzzer no TIM8_CH1: clock do timer = 170MHz/170 = 1 MHz (prescaler 170-1).
-	    // Frequência do tom = 1e6 / (ARR+1). Duty 50% => compare = (ARR+1)/2.
-	    const uint32_t ulBuzzerClkHz = 1000000UL;
+    // Buzzer no TIM8_CH1: clock do timer = 170MHz/170 = 1 MHz (prescaler 170-1).
+    const uint32_t ulBuzzerClkHz = 1000000UL;
 
-	    // Filtro de plausibilidade do ultrassom. A captura por DMA (BOTHEDGE, buffer
-	    // circular de 2 posições sobre o TIM3 livre) gera leituras espúrias entre ecos
-	    // e quando o sensor não está conectado, o que fazia o buzzer tocar sem parar.
-	    // Só acionamos o buzzer após ucUltraConfirm leituras CONSECUTIVAS dentro da
-	    // faixa válida; qualquer leitura fora/implausível zera a contagem.
-	    const float   fUltraMinCm    = 2.0f;    // < 2 cm = espúrio (mínimo do HC-SR04)
-	    const float   fUltraAlertCm  = 20.0f;   // distância em que começa a apitar
-	    const uint8_t ucUltraConfirm = 3U;      // leituras consecutivas p/ confirmar
-	    uint8_t       ucNearCount    = 0U;
+    // Parâmetros do ultrassom e do buzzer
+    const float   fUltraMinCm    = 2.0f;      // mínimo plausível (evita espúrios)
+    const float   fUltraAlertCm  = 20.0f;     // distância para começar a apitar
+    const float   fUltraMaxCm    = 400.0f;    // máximo plausível
+    const uint8_t ucUltraConfirm = 2U;        // amostras consecutivas para confirmar alerta
 
-	    // FILTRO: média móvel das últimas ULTRA_AVG_N leituras VÁLIDAS. Sem isto, a
-	    // distância oscila ciclo a ciclo e a frequência do buzzer fica pulando. Só
-	    // entram na média leituras plausíveis (2..400 cm); espúrias são descartadas.
-	    const float   fUltraMaxCm   = 400.0f;
-	    #define       ULTRA_AVG_N   8U
-	    float         fUltraBuf[ULTRA_AVG_N];
-	    uint8_t       ucUltraIdx    = 0U;
-	    uint8_t       ucUltraCnt    = 0U;
+    // Filtro de média móvel com 20 amostras
+    #define       ULTRA_AVG_N   20U
+    float         fUltraBuf[ULTRA_AVG_N];
+    uint8_t       ucUltraIdx    = 0U;
+    uint8_t       ucUltraCnt    = 0U;         // quantas amostras já foram inseridas
+    uint8_t       ucNearCount   = 0U;         // contagem de amostras na zona de alerta
 
-	    for(;;)
-	    {
-	        vTaskDelayUntil(&xLastWakeTime, xPeriod);
+    for(;;)
+    {
+        vTaskDelayUntil(&xLastWakeTime, xPeriod);
 
-	        // Leitura crua do driver (cm); só entra na média se for plausível.
-	        float fRaw = fDistanceSensorGetDistance();
-	        if (fRaw >= fUltraMinCm && fRaw <= fUltraMaxCm)
-	        {
-	            fUltraBuf[ucUltraIdx] = fRaw;
-	            ucUltraIdx = (uint8_t)((ucUltraIdx + 1U) % ULTRA_AVG_N);
-	            if (ucUltraCnt < ULTRA_AVG_N) ucUltraCnt++;
-	        }
-	        // fDistance = média das leituras válidas acumuladas (suave). Sem nenhuma
-	        // leitura válida ainda -> trata como "longe" (buzzer desligado).
-	        if (ucUltraCnt > 0U)
-	        {
-	            float fSum = 0.0f;
-	            for (uint8_t k = 0U; k < ucUltraCnt; k++) fSum += fUltraBuf[k];
-	            fDistance = fSum / (float)ucUltraCnt;
-	        }
-	        else
-	        {
-	            fDistance = fUltraAlertCm;
-	        }
+        // 1. Leitura crua do driver (cm)
+        float fRaw = fDistanceSensorGetDistance();
 
-	        // Leitura considerada "perto e válida"? Exige consistência antes de apitar.
-	        if (fDistance >= fUltraMinCm && fDistance < fUltraAlertCm)
-	        {
-	            if (ucNearCount < ucUltraConfirm) ucNearCount++;
-	        }
-	        else
-	        {
-	            ucNearCount = 0U;   // leitura fora da faixa -> mata o ruído do sensor
-	        }
+        // 2. Substitui leituras inválidas por um valor alto (indica "longe")
+        if (fRaw < fUltraMinCm || fRaw > fUltraMaxCm) {
+            fRaw = fUltraMaxCm;
+        }
 
-	        uint16_t usFreq = 0;   // 0 = buzzer desligado
-	        if (ucNearCount >= ucUltraConfirm)
-	        {
-	            if (fDistance < STOP_DISTANCE_CM)
-	            {
-	                // Obstáculo muito próximo: parada imediata (prioridade na fila) + tom máximo
-	                osMessageQueuePut(qMotorCommandHandle, &xStopCmd, 1U, 0);
-	                usFreq = 2000;
-	            }
-	            else
-	            {
-	                // 20 cm -> 500 Hz ... 5 cm -> 2000 Hz (proporcional)
-	                usFreq = (uint16_t)(500.0f + (fUltraAlertCm - fDistance) *
-	                                    (1500.0f / (fUltraAlertCm - STOP_DISTANCE_CM)));
-	                if (usFreq > 2000) usFreq = 2000;
-	            }
-	        }
+        // 3. Insere no buffer circular da média móvel
+        fUltraBuf[ucUltraIdx] = fRaw;
+        ucUltraIdx = (ucUltraIdx + 1U) % ULTRA_AVG_N;
+        if (ucUltraCnt < ULTRA_AVG_N) {
+            ucUltraCnt++;
+        }
 
-	        if (usFreq == 0)
-	        {
-	            __HAL_TIM_SET_COMPARE(&htim8, TIM_CHANNEL_1, 0);   // silencia
-	        }
-	        else
-	        {
-	            uint32_t ulArr = (ulBuzzerClkHz / usFreq) - 1U;
-	            __HAL_TIM_SET_AUTORELOAD(&htim8, ulArr);
-	            __HAL_TIM_SET_COMPARE(&htim8, TIM_CHANNEL_1, (ulArr + 1U) / 2U); // 50% duty
-	        }
-	    }
+        // 4. Calcula a média (usa todas as amostras quando o buffer está cheio)
+        if (ucUltraCnt == ULTRA_AVG_N) {
+            float fSum = 0.0f;
+            for (uint8_t k = 0U; k < ULTRA_AVG_N; k++) {
+                fSum += fUltraBuf[k];
+            }
+            fDistance = fSum / (float)ULTRA_AVG_N;
+        } else {
+            // Ainda não encheu o buffer; média parcial
+            float fSum = 0.0f;
+            for (uint8_t k = 0U; k < ucUltraCnt; k++) {
+                fSum += fUltraBuf[k];
+            }
+            fDistance = fSum / (float)ucUltraCnt;
+        }
+
+        // 5. Verifica se a distância média está na zona de alerta
+        if (fDistance >= fUltraMinCm && fDistance < fUltraAlertCm) {
+            if (ucNearCount < ucUltraConfirm) ucNearCount++;
+        } else {
+            ucNearCount = 0U;   // zera imediatamente ao sair da zona
+        }
+
+        // 6. Decisão do buzzer e parada de emergência
+        uint16_t usFreq = 0;   // 0 = buzzer desligado
+        if (ucNearCount >= ucUltraConfirm) {
+            if (fDistance < STOP_DISTANCE_CM) {
+                // Obstáculo muito próximo: parada imediata + tom máximo
+                osMessageQueuePut(qMotorCommandHandle, &xStopCmd, 1U, 0);
+                usFreq = 2000;
+            } else {
+                // Frequência proporcional à distância (20cm->500Hz, 5cm->2000Hz)
+                usFreq = (uint16_t)(500.0f + (fUltraAlertCm - fDistance) *
+                                    (1500.0f / (fUltraAlertCm - STOP_DISTANCE_CM)));
+                if (usFreq > 2000) usFreq = 2000;
+            }
+        }
+
+        // 7. Aplica a frequência no buzzer (TIM8_CH1)
+        if (usFreq == 0) {
+            __HAL_TIM_SET_COMPARE(&htim8, TIM_CHANNEL_1, 0);
+        } else {
+            uint32_t ulArr = (ulBuzzerClkHz / usFreq) - 1U;
+            __HAL_TIM_SET_AUTORELOAD(&htim8, ulArr);
+            __HAL_TIM_SET_COMPARE(&htim8, TIM_CHANNEL_1, (ulArr + 1U) / 10U);
+        }
+    }
 #endif /* ULTRASONIC_BUZZER_ENABLED */
-
   /* USER CODE END vStartTaskUltrassonicBuzzer */
 }
+
 
 /* Private application code --------------------------------------------------*/
 /* USER CODE BEGIN Application */

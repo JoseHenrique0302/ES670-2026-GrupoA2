@@ -52,18 +52,20 @@ static void vMotorEncoderSetDirection(motorEncoderMotor_t xMotor,
   switch (xMotor) {
     case MOTORENCODER_MOTOR_RIGHT:
       switch (xDirection) {
-        case MOTORENCODER_DIRECTION_FORWARD:
-          HAL_GPIO_WritePin(xMotorEncoderPeripherals.pIn1Port,
-            xMotorEncoderPeripherals.usIn1Pin, GPIO_PIN_RESET);
-          HAL_GPIO_WritePin(xMotorEncoderPeripherals.pIn2Port,
-            xMotorEncoderPeripherals.usIn2Pin, GPIO_PIN_SET);
-          break;
-
         case MOTORENCODER_DIRECTION_BACKWARD:
+          // Invertido: antes era IN1=RESET, IN2=SET
           HAL_GPIO_WritePin(xMotorEncoderPeripherals.pIn1Port,
             xMotorEncoderPeripherals.usIn1Pin, GPIO_PIN_SET);
           HAL_GPIO_WritePin(xMotorEncoderPeripherals.pIn2Port,
             xMotorEncoderPeripherals.usIn2Pin, GPIO_PIN_RESET);
+          break;
+
+        case MOTORENCODER_DIRECTION_FORWARD:
+          // Invertido: antes era IN1=SET, IN2=RESET
+          HAL_GPIO_WritePin(xMotorEncoderPeripherals.pIn1Port,
+            xMotorEncoderPeripherals.usIn1Pin, GPIO_PIN_RESET);
+          HAL_GPIO_WritePin(xMotorEncoderPeripherals.pIn2Port,
+            xMotorEncoderPeripherals.usIn2Pin, GPIO_PIN_SET);
           break;
 
         case MOTORENCODER_DIRECTION_STOP:
@@ -86,15 +88,16 @@ static void vMotorEncoderSetDirection(motorEncoderMotor_t xMotor,
       break;
 
     case MOTORENCODER_MOTOR_LEFT:
+      // Mantém o original (se estiver correto)
       switch (xDirection) {
-        case MOTORENCODER_DIRECTION_FORWARD:
+        case MOTORENCODER_DIRECTION_BACKWARD:
           HAL_GPIO_WritePin(xMotorEncoderPeripherals.pIn3Port,
             xMotorEncoderPeripherals.usIn3Pin, GPIO_PIN_SET);
           HAL_GPIO_WritePin(xMotorEncoderPeripherals.pIn4Port,
             xMotorEncoderPeripherals.usIn4Pin, GPIO_PIN_RESET);
           break;
 
-        case MOTORENCODER_DIRECTION_BACKWARD:
+        case MOTORENCODER_DIRECTION_FORWARD:
           HAL_GPIO_WritePin(xMotorEncoderPeripherals.pIn3Port,
             xMotorEncoderPeripherals.usIn3Pin, GPIO_PIN_RESET);
           HAL_GPIO_WritePin(xMotorEncoderPeripherals.pIn4Port,
