@@ -17,7 +17,10 @@ typedef struct {
 
 #define DISTANCESENSOR_CAPTURE_COUNT          2U
 #define DISTANCESENSOR_TRIGGER_COMPARE_VALUE  100U
-#define DISTANCESENSOR_DISTANCE_DIVISOR       58.0f
+/* Divisor acoplado ao prescaler do timer do ECO (TIM3).
+ * TIM3 a 100 kHz (prescaler 1700-1 => 10 us/tick): dist_cm = ticks*10/58 = ticks/5.8.
+ * (Antes, TIM3 a 1 MHz/1 us-tick, o divisor era 58.) */
+#define DISTANCESENSOR_DISTANCE_DIVISOR       5.8f
 
 static distanceSensorAttributes_t xDistanceSensorAttributes;
 
