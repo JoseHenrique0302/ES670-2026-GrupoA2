@@ -156,7 +156,7 @@ typedef struct {
 #define BUMPER_EMERGENCY_ENABLED    1
 
 // LEDs RGB no TIM4 (PWM, ARR=999). Usados como indicadores:
-//   - Vermelho (CH1, PA11): aceso em modo MANUAL, apagado em AUTOMÁTICO.
+//   - Vermelho (CH1, PA11): aceso em modo MANUAL, apagado em AUTOM�?TICO.
 //   - Azul     (CH3, PB8) : aceso enquanto a calibração está em andamento.
 // Aceso=999, apagado=0. (Se a placa for ativa-baixa, troque LED_ON/LED_OFF.)
 #define LED_ON   999
@@ -1231,7 +1231,7 @@ void vStartTaskTrocarModo(void *argument)
 	            ucCurrentMode = ucNewMode;
 	            gvSystemMode = ucCurrentMode;   // <- vTaskSegueLinha passa a (não) rodar o PID
 
-	            // LED vermelho indica o modo: ACESO em MANUAL, apagado em AUTOMÁTICO.
+	            // LED vermelho indica o modo: ACESO em MANUAL, apagado em AUTOM�?TICO.
 	            LED_MANUAL_SET(ucCurrentMode == MODE_MANUAL);
 
 	            // SEGURANÇA: ao sair do modo AUTÔNOMO a vTaskSegueLinha deixa de enviar
@@ -1373,7 +1373,6 @@ void vStartTaskUltrassonicBuzzer(void *argument)
 #endif /* ULTRASONIC_BUZZER_ENABLED */
   /* USER CODE END vStartTaskUltrassonicBuzzer */
 }
-
 
 /* Private application code --------------------------------------------------*/
 /* USER CODE BEGIN Application */
