@@ -83,7 +83,7 @@ typedef struct {
     uint8_t  batteryPct;       // bateria estimada (%)
     uint8_t  systemMode;       // MANUAL=0, AUTONOMOUS=1
     uint8_t  calibDone;        // flag: calibração concluída
-    uint8_t  reserved;         // alinhamento
+    uint16_t batteryRawAdc;    // raw ADC1 (0..4095) p/ diagnosticar a leitura de bateria
 } TelemetryData_t;
 
 // Estrutura para dados de calibração persistidos (GV3)
@@ -174,6 +174,11 @@ typedef struct {
 /* USER CODE BEGIN Variables */
 // Variáveis globais conforme diagrama
 static volatile int32_t gvEncoderCounts[2] = {0, 0};   // GV1: [0]=esquerda, [1]=direita
+// Sinal de direção comandada por roda ([0]=esquerda, [1]=direita): o encoder é
+// de 1 canal (só conta pulsos, sempre crescente) -> a odometria precisa deste
+// sinal (gravado em vStartTaskMotor) para saber se o delta de pulsos foi para
+// frente (+1) ou para trás (-1). Sem isto, andar de ré soma em vez de subtrair.
+static volatile int8_t gvMotorDirSign[2] = {1, 1};
 static CalibData_t gvCalibData;                        // GV3: dados de calibração
 static PidParams_t gvPIDParams;                        // GV2: ganhos PID atuais
 static TelemetryData_t gvTelemetry;                    // GV5: telemetria
@@ -661,6 +666,11 @@ void vStartTaskMotor(void *argument)
 	            }
 	            else
 	            {
+	                // Grava o sinal comandado por roda p/ a odometria (encoder de 1
+	                // canal não sabe a direção por hardware). No STOP, o sinal
+	                // anterior é mantido de propósito (parado não inverte sentido).
+	                gvMotorDirSign[0] = (xCmd.fSpeedLeft  >= 0.0f) ? 1 : -1;
+	                gvMotorDirSign[1] = (xCmd.fSpeedRight >= 0.0f) ? 1 : -1;
 	                vMotorEncoderControlMotor(MOTORENCODER_MOTOR_LEFT,
 	                    (xCmd.fSpeedLeft >= 0) ? MOTORENCODER_DIRECTION_FORWARD : MOTORENCODER_DIRECTION_BACKWARD,
 	                    (xCmd.fSpeedLeft > 0) ? xCmd.fSpeedLeft : -xCmd.fSpeedLeft);
@@ -698,6 +708,14 @@ void vStartTaskSegueLinha(void *argument)
 	    float fIntegral = 0.0f;
 	    float fLastError = 0.0f;
 
+	    // Estado do detector de fim-de-pista (distingue cruzamento de marca de
+	    // fim pela DISTÂNCIA percorrida com os 5 sensores em branco, não pelo
+	    // tempo -> robusto a variação de velocidade). Calibrar na pista: maior
+	    // que a largura de um cruzamento e menor que a marca de fim.
+	    const float FINISH_WHITE_DIST_M = 0.12f;
+	    float   fAllWhiteStartDist = -1.0f;
+	    uint8_t ucFinished = 0U;
+
 	    const TickType_t xPeriod = pdMS_TO_TICKS(TASK_PERIOD_SENSORS); // 50 ms
 	    TickType_t xLastWakeTime = xTaskGetTickCount();
 
@@ -718,6 +736,7 @@ void vStartTaskSegueLinha(void *argument)
 	        if (osMutexAcquire(mutexTelemetryHandle, pdMS_TO_TICKS(5)) == osOK)
 	        {
 	            gvTelemetry.batteryPct = ucBatteryPct;
+	            gvTelemetry.batteryRawAdc = usBatteryRaw;
 	            osMutexRelease(mutexTelemetryHandle);
 	        }
 	        // Emergência por bateria fraca usando a PORCENTAGEM calibrada (battery.c).
@@ -731,9 +750,13 @@ void vStartTaskSegueLinha(void *argument)
 	        /* ---- 3) Controle de linha: só no modo AUTÔNOMO ---- */
 	        if (gvSystemMode != MODE_AUTONOMOUS)
 	        {
-	            // Modo MANUAL: zera estado do PID; os motores são comandados via UART.
+	            // Modo MANUAL: zera estado do PID e do detector de fim-de-pista,
+	            // para que a próxima volta autônoma recomece do zero; os motores
+	            // são comandados via UART.
 	            fIntegral  = 0.0f;
 	            fLastError = 0.0f;
+	            ucFinished = 0U;
+	            fAllWhiteStartDist = -1.0f;
 	            continue;
 	        }
 
@@ -745,6 +768,46 @@ void vStartTaskSegueLinha(void *argument)
 	        {
 	            if (ucIRBin[i]) { fError += (float)cWeights[i]; ucActive++; }
 	        }
+
+	        /* ---- 3b) Detecção de fim de pista: 5 sensores em branco por uma
+	         * DISTÂNCIA maior que a de um cruzamento -> para e trava os motores.
+	         * Cruzamentos (curtos) são apenas atravessados pelo fallback de
+	         * "linha perdida" abaixo, sem disparar o fim. ---- */
+	        if (!ucFinished)
+	        {
+	            if (ucActive == 0U)
+	            {
+	                float fDistNow = 0.0f;
+	                if (osMutexAcquire(mutexTelemetryHandle, pdMS_TO_TICKS(5)) == osOK)
+	                {
+	                    fDistNow = gvTelemetry.distTotal;
+	                    osMutexRelease(mutexTelemetryHandle);
+	                }
+	                if (fAllWhiteStartDist < 0.0f) fAllWhiteStartDist = fDistNow;
+	                if ((fDistNow - fAllWhiteStartDist) > FINISH_WHITE_DIST_M)
+	                {
+	                    ucFinished = 1U;
+	                    MotorCommand_t xStopCmd = {0.0f, 0.0f, 0}; // ucCmdType 0 = STOP
+	                    osMessageQueuePut(qMotorCommandHandle, &xStopCmd, 1U, 0);
+	                    // Pede a troca p/ MANUAL pela fila (vTaskTrocarModo segue
+	                    // sendo o único escritor de gvSystemMode, e já atualiza o
+	                    // LED) -> a volta termina travada, sem retomar sozinha.
+	                    uint8_t ucModeMsg = MODE_MANUAL;
+	                    osMessageQueuePut(qTrocaModoHandle, &ucModeMsg, 0U, 0);
+	                }
+	            }
+	            else
+	            {
+	                fAllWhiteStartDist = -1.0f; // achou a linha de novo: fim do cruzamento
+	            }
+	        }
+	        if (ucFinished)
+	        {
+	            fIntegral  = 0.0f;
+	            fLastError = 0.0f;
+	            continue; // já parado/travado; não recalcula PID nem reenfileira comando
+	        }
+
 	        if (ucActive)
 	            fError /= (float)ucActive;
 	        else
@@ -801,10 +864,10 @@ void vStartTaskOdometria(void *argument)
     static float fLastLeftCount = 0.0f, fLastRightCount = 0.0f;
 
     // Parâmetros geométricos do robô (em metros)
-    const float WHEEL_RADIUS = 0.0315f;        // raio da roda (diâmetro 63 mm / 2)
+    const float WHEEL_PERIMETER = 0.21f;       // perímetro MEDIDO da roda (substitui 2*pi*raio)
     const float HALF_WHEEL_BASE = 0.0665f;     // E = distância entre rodas / 2 (133 mm / 2)
     const float PPR = 20.0f;                   // pulsos por revolução (x1)
-    const float METERS_PER_TICK = (2.0f * 3.1415926535897932f * WHEEL_RADIUS) / PPR;
+    const float METERS_PER_TICK = WHEEL_PERIMETER / PPR;
 
     // Variáveis para média de velocidade
     static float fSpeedSum = 0.0f;
@@ -822,9 +885,12 @@ void vStartTaskOdometria(void *argument)
       rightCount = gvEncoderCounts[1];
       taskEXIT_CRITICAL();
 
-      // 2. Incrementos em metros para cada roda
-      float fDeltaLeft  = (leftCount  - fLastLeftCount)  * METERS_PER_TICK;
-      float fDeltaRight = (rightCount - fLastRightCount) * METERS_PER_TICK;
+      // 2. Incrementos em metros para cada roda. O encoder só conta pulsos (1
+      // canal, sempre cresce); aplica-se o sinal da direção comandada
+      // (gvMotorDirSign, gravado em vStartTaskMotor) para que andar de ré
+      // decremente a pose em vez de somar como se fosse pra frente.
+      float fDeltaLeft  = (leftCount  - fLastLeftCount)  * METERS_PER_TICK * (float)gvMotorDirSign[0];
+      float fDeltaRight = (rightCount - fLastRightCount) * METERS_PER_TICK * (float)gvMotorDirSign[1];
       fLastLeftCount  = leftCount;
       fLastRightCount = rightCount;
       // 3. Cinemática diferencial
@@ -921,7 +987,10 @@ void vStartTaskUART(void *argument)
                     osMutexRelease(mutexPIDParamsHandle);
                 }
                 snprintf(txBuffer, sizeof(txBuffer), "PID:%.2f %.2f %.2f\r\n", kp, ki, kd);
+                // Responde nas duas UARTs: permite testar comandos pelo VCP do
+                // ST-Link (sem celular/HC-05) e ver a resposta no mesmo terminal.
                 HAL_UART_Transmit(&huart3, (uint8_t*)txBuffer, strlen(txBuffer), 100);
+                HAL_UART_Transmit(&hlpuart1, (uint8_t*)txBuffer, strlen(txBuffer), 100);
             }
             else if (strcmp((char*)rxBuffer, "MANUAL") == 0)
             {
@@ -987,11 +1056,16 @@ void vStartTaskUART(void *argument)
 	                osMutexRelease(mutexTelemetryHandle);
 	            }
 	            snprintf(txBuffer, sizeof(txBuffer),
-	                "X=%.2f Y=%.2f Th=%.2f V=%.2f Vavg=%.2f Dist=%.2f Bat=%u%% Mode=%u Calib=%u\r\n",
+	                "X=%.2f Y=%.2f Th=%.2f V=%.2f Vavg=%.2f Dist=%.2f Bat=%u%% BatRaw=%u Mode=%u Calib=%u\r\n",
 	                telemetrySnap.posX, telemetrySnap.posY, telemetrySnap.theta,
 	                telemetrySnap.speedCurrent, telemetrySnap.speedAverage, telemetrySnap.distTotal,
-	                telemetrySnap.batteryPct, telemetrySnap.systemMode, telemetrySnap.calibDone);
+	                telemetrySnap.batteryPct, telemetrySnap.batteryRawAdc, telemetrySnap.systemMode,
+	                telemetrySnap.calibDone);
+	            // Envia nas duas UARTs: a colega consegue ver a telemetria (e o
+	            // BatRaw=, p/ diagnosticar a bateria) no terminal serial do VCP do
+	            // ST-Link, sem precisar do celular/HC-05.
 	            HAL_UART_Transmit(&huart3, (uint8_t*)txBuffer, strlen(txBuffer), 100);
+	            HAL_UART_Transmit(&hlpuart1, (uint8_t*)txBuffer, strlen(txBuffer), 100);
 	        }
 	    }
 
@@ -1011,9 +1085,9 @@ void vStartTaskLCD(void *argument)
 
 	    (void)argument;
 	    // Requisito funcional do LCD: exibir velocidade atual, distância percorrida,
-	    // coordenadas (x,y) e bateria (%), atualizando a 1 Hz. Lê a telemetria
+	    // coordenadas (x,y,theta) e bateria (%), atualizando a 1 Hz. Lê a telemetria
 	    // diretamente (sob mutex) -> sempre o valor MAIS RECENTE, sem fila atrasando.
-	    //   Linha 1:  X:<x> Y:<y>            (metros)
+	    //   Linha 1:  X<x>Y<y>T<theta>       (metros, metros, graus)
 	    //   Linha 2:  V<vel> D<dist> B<bat>% (m/s, metros, %)
 	    char l1[17], l2[17];
 	    TelemetryData_t t = {0};   // zera p/ não exibir lixo se um acquire falhar
@@ -1034,7 +1108,9 @@ void vStartTaskLCD(void *argument)
 
 	        // Monta as 2 linhas e completa com espaços até 16 col (lcdPrintStr manda
 	        // 16 bytes fixos; sem o padding sobraria lixo/null no fim da linha).
-	        n = snprintf(l1, sizeof(l1), "X:%+5.2f Y:%+5.2f", t.posX, t.posY);
+	        // Theta (rad) convertido p/ graus, mais legível no display 16x2.
+	        float fThetaDeg = t.theta * 57.29577951f;
+	        n = snprintf(l1, sizeof(l1), "X%+4.1fY%+4.1fT%+4.0f", t.posX, t.posY, fThetaDeg);
 	        for (int i = (n < 0 ? 0 : n); i < 16; i++) l1[i] = ' ';
 	        n = snprintf(l2, sizeof(l2), "V%4.2f D%4.1fB%u%%",
 	                     t.speedCurrent, t.distTotal, t.batteryPct);
