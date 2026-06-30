@@ -380,8 +380,10 @@ void MX_FREERTOS_Init(void) {
 
     // Ganhos PID padrão do seguir-linha. SEM isto ficavam em 0 (memset) e a
     // vTaskSegueLinha não gerava NENHUMA correção -> robô só andava reto.
-    // Ajustáveis em tempo de execução via "SET_PID kp ki kd" (UART).
-    gvPIDParams.fKp = 0.5f;
+    // Ajustáveis em tempo de execução via "SET_PID kp ki kd" (UART/app) -> dá
+    // pra afinar na pista SEM reflashar. Kp subido de 0.5 -> 0.6 p/ pegar curva
+    // mais cedo (opção (a)); se aumentar o wobble, subir Kd (0.1) pelo app.
+    gvPIDParams.fKp = 0.6f;
     gvPIDParams.fKi = 0.0f;
     gvPIDParams.fKd = 0.1f;
 
@@ -713,7 +715,7 @@ void vStartTaskSegueLinha(void *argument)
 	    // tempo -> robusto a variação de velocidade). Tem que ficar MAIOR que a
 	    // largura de um cruzamento e MENOR que a faixa de fim (medida = 6 cm),
 	    // senão ele nunca acumula a distância em cima da faixa. 4 cm = meio termo.
-	    const float FINISH_WHITE_DIST_M = 0.04f;
+	    const float FINISH_WHITE_DIST_M = 0.03f;
 	    float   fAllWhiteStartDist = -1.0f;
 	    uint8_t ucFinished = 0U;
 
@@ -844,7 +846,7 @@ void vStartTaskSegueLinha(void *argument)
 	            fError = (fLastError >= 0.0f) ? 2.0f : -2.0f;
 
 	        // Ganhos PID atuais (ajustáveis por Bluetooth via mutexPIDParams)
-	        float fKp = 0.04f, fKi = 0.01f, fKd = 0.0f;
+	        float fKp = 0.6f, fKi = 0.0f, fKd = 0.1f;   // fallback = defaults do init
 	        if (osMutexAcquire(mutexPIDParamsHandle, pdMS_TO_TICKS(5)) == osOK)
 	        {
 	            fKp = gvPIDParams.fKp;
