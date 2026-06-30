@@ -1303,13 +1303,21 @@ void vStartTaskUltrassonicBuzzer(void *argument)
     uint8_t       ucNearCount   = 0U;
 
     // ---- FILTRO DE MÉDIA MÓVEL (DESATIVADO, mantido p/ referência) ----------
-    // Substituído pela decisão por FAIXAS de distância (thresholds) usando a
-    // leitura crua. Para voltar à média: descomente estas declarações e o bloco
-    // "3+4" dentro do laço, e remova a linha "fDistance = fRaw;".
+    // Substituído pela MEDIANA (abaixo) + decisão por FAIXAS. Para voltar à
+    // média: descomente estas declarações e o bloco "3+4" dentro do laço.
     // #define       ULTRA_AVG_N   20U
     // float         fUltraBuf[ULTRA_AVG_N];
     // uint8_t       ucUltraIdx    = 0U;
     // uint8_t       ucUltraCnt    = 0U;
+
+    // ---- FILTRO DE MEDIANA (5 amostras) -> alimenta as FAIXAS -----------------
+    // A mediana rejeita PICOS espúrios (leituras erradas por gatilho rápido do
+    // HC-SR04 / estouro do timer do eco) que, na leitura crua, faziam o buzzer
+    // apitar sem parar ao ligar. Buffer inicia em 400 cm ("longe") -> silêncio
+    // no boot até ter amostras reais de obstáculo próximo.
+    #define       ULTRA_MED_N   5U
+    float         fMedBuf[ULTRA_MED_N] = {400.0f, 400.0f, 400.0f, 400.0f, 400.0f};
+    uint8_t       ucMedIdx     = 0U;
 
     for(;;)
     {
@@ -1324,7 +1332,6 @@ void vStartTaskUltrassonicBuzzer(void *argument)
         }
 
         // 3+4. MÉDIA MÓVEL (DESATIVADA — mantida comentada p/ referência).
-        //      Agora a decisão usa a leitura crua direto, por FAIXAS (passo 6).
         // fUltraBuf[ucUltraIdx] = fRaw;
         // ucUltraIdx = (ucUltraIdx + 1U) % ULTRA_AVG_N;
         // if (ucUltraCnt < ULTRA_AVG_N) { ucUltraCnt++; }
@@ -1337,9 +1344,21 @@ void vStartTaskUltrassonicBuzzer(void *argument)
         //     for (uint8_t k = 0U; k < ucUltraCnt; k++) fSum += fUltraBuf[k];
         //     fDistance = fSum / (float)ucUltraCnt;
         // }
-        fDistance = fRaw;   // usa a leitura crua (já com guarda de inválido no passo 2)
 
-        // 5. Verifica se a distância (crua) está na zona de alerta
+        // 3+4 (ATIVO). MEDIANA de 5 amostras cruas -> rejeita picos espúrios.
+        fMedBuf[ucMedIdx] = fRaw;
+        ucMedIdx = (uint8_t)((ucMedIdx + 1U) % ULTRA_MED_N);
+        float fTmp[ULTRA_MED_N];
+        for (uint8_t k = 0U; k < ULTRA_MED_N; k++) fTmp[k] = fMedBuf[k];
+        for (uint8_t a = 1U; a < ULTRA_MED_N; a++) {   // insertion sort (N=5)
+            float v = fTmp[a];
+            int8_t b = (int8_t)a - 1;
+            while (b >= 0 && fTmp[b] > v) { fTmp[b + 1] = fTmp[b]; b--; }
+            fTmp[b + 1] = v;
+        }
+        fDistance = fTmp[ULTRA_MED_N / 2];   // elemento do meio = mediana
+
+        // 5. Verifica se a distância (mediana) está na zona de alerta
         if (fDistance >= fUltraMinCm && fDistance < fUltraAlertCm) {
             if (ucNearCount < ucUltraConfirm) ucNearCount++;
         } else {
