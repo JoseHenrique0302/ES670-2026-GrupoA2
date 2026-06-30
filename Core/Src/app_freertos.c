@@ -147,13 +147,13 @@ typedef struct {
 // sensor nem aciona o buzzer e o trigger (TIM20/TIM3) nem é iniciado — evita o
 // alarme falso (pino de eco flutuando lê <5cm -> zona de STOP -> freq. máxima)
 // enquanto focamos no seguir-linha. Para REABILITAR no futuro: trocar para 1.
-#define ULTRASONIC_BUZZER_ENABLED   1
+#define ULTRASONIC_BUZZER_ENABLED   0
 
 // Bumper frontal (PD2/Switch_Fr) como parada de emergência. Em 0, o EXTI do PD2
 // NÃO seta a emergência — evita TRAVAR o robô se o PD2 estiver flutuando/sem pull
 // (a emergência nunca é limpa e congela o vTaskMotor). Religar (1) só após pôr
 // pull-up/down no PD2 na IOC e validar a chave.
-#define BUMPER_EMERGENCY_ENABLED    1
+#define BUMPER_EMERGENCY_ENABLED    0
 
 // LEDs RGB no TIM4 (PWM, ARR=999). Usados como indicadores:
 //   - Vermelho (CH1, PA11): aceso em modo MANUAL, apagado em AUTOMATICO.
@@ -747,7 +747,10 @@ void vStartTaskSegueLinha(void *argument)
 	        // comparava com 5500mV -> a condição era SEMPRE verdadeira, a emergência
 	        // ligava no 1º ciclo e os motores NUNCA rodavam. O guard usBatteryRaw>100
 	        // evita falso disparo no boot, antes do ADC/DMA converter (leitura ~0).
-	        if (usBatteryRaw > 100U && ucBatteryPct < BATTERY_MIN_PCT)
+	        // DESABILITADO p/ focar no seguir-linha: se a % da bateria calibrar errado,
+		// isto dispara a emergência e CONGELA o vTaskMotor (só sai com RIGHT) ->
+		// robô não anda em AUTO. Reabilitar só após validar a calibração da bateria.
+		if (0 && usBatteryRaw > 100U && ucBatteryPct < BATTERY_MIN_PCT)
 	            osEventFlagsSet(evEmergencyHandle, EMERGENCY_BIT);
 
 	        /* ---- 3) Controle de linha: só no modo AUTÔNOMO ---- */
