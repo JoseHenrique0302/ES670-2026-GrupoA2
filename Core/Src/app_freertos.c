@@ -143,11 +143,11 @@ typedef struct {
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
-// Habilita o subsistema ultrassom + buzzer. Em 0, a vTaskUltraBuzz NÃO lê o
-// sensor nem aciona o buzzer e o trigger (TIM20/TIM3) nem é iniciado — evita o
-// alarme falso (pino de eco flutuando lê <5cm -> zona de STOP -> freq. máxima)
-// enquanto focamos no seguir-linha. Para REABILITAR no futuro: trocar para 1.
-#define ULTRASONIC_BUZZER_ENABLED   0
+// Habilita o subsistema ultrassom + buzzer. RELIGADO (1): a causa do alarme
+// falso (trigger a 10ms + estouro do timer do eco) foi corrigida (TIM3 e TIM20
+// a 1700-1/100kHz, divisor 5.8) e o buzzer usa mediana + gate de spread. Em 0,
+// a vTaskUltraBuzz silencia e nem inicia o sensor (p/ isolar o seguir-linha).
+#define ULTRASONIC_BUZZER_ENABLED   1
 
 // Bumper frontal (PD2/Switch_Fr) como parada de emergência. Em 0, o EXTI do PD2
 // NÃO seta a emergência — evita TRAVAR o robô se o PD2 estiver flutuando/sem pull
