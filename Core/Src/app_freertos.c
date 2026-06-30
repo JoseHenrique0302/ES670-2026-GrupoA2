@@ -1298,12 +1298,18 @@ void vStartTaskUltrassonicBuzzer(void *argument)
     const float   fUltraMaxCm    = 400.0f;    // máximo plausível
     const uint8_t ucUltraConfirm = 2U;        // amostras consecutivas para confirmar alerta
 
-    // Filtro de média móvel com 20 amostras
-    #define       ULTRA_AVG_N   20U
-    float         fUltraBuf[ULTRA_AVG_N];
-    uint8_t       ucUltraIdx    = 0U;
-    uint8_t       ucUltraCnt    = 0U;         // quantas amostras já foram inseridas
-    uint8_t       ucNearCount   = 0U;         // contagem de amostras na zona de alerta
+    // ucNearCount: debounce — exige N amostras consecutivas na zona de alerta
+    // antes de apitar.
+    uint8_t       ucNearCount   = 0U;
+
+    // ---- FILTRO DE MÉDIA MÓVEL (DESATIVADO, mantido p/ referência) ----------
+    // Substituído pela decisão por FAIXAS de distância (thresholds) usando a
+    // leitura crua. Para voltar à média: descomente estas declarações e o bloco
+    // "3+4" dentro do laço, e remova a linha "fDistance = fRaw;".
+    // #define       ULTRA_AVG_N   20U
+    // float         fUltraBuf[ULTRA_AVG_N];
+    // uint8_t       ucUltraIdx    = 0U;
+    // uint8_t       ucUltraCnt    = 0U;
 
     for(;;)
     {
@@ -1317,49 +1323,55 @@ void vStartTaskUltrassonicBuzzer(void *argument)
             fRaw = fUltraMaxCm;
         }
 
-        // 3. Insere no buffer circular da média móvel
-        fUltraBuf[ucUltraIdx] = fRaw;
-        ucUltraIdx = (ucUltraIdx + 1U) % ULTRA_AVG_N;
-        if (ucUltraCnt < ULTRA_AVG_N) {
-            ucUltraCnt++;
-        }
+        // 3+4. MÉDIA MÓVEL (DESATIVADA — mantida comentada p/ referência).
+        //      Agora a decisão usa a leitura crua direto, por FAIXAS (passo 6).
+        // fUltraBuf[ucUltraIdx] = fRaw;
+        // ucUltraIdx = (ucUltraIdx + 1U) % ULTRA_AVG_N;
+        // if (ucUltraCnt < ULTRA_AVG_N) { ucUltraCnt++; }
+        // if (ucUltraCnt == ULTRA_AVG_N) {
+        //     float fSum = 0.0f;
+        //     for (uint8_t k = 0U; k < ULTRA_AVG_N; k++) fSum += fUltraBuf[k];
+        //     fDistance = fSum / (float)ULTRA_AVG_N;
+        // } else {
+        //     float fSum = 0.0f;
+        //     for (uint8_t k = 0U; k < ucUltraCnt; k++) fSum += fUltraBuf[k];
+        //     fDistance = fSum / (float)ucUltraCnt;
+        // }
+        fDistance = fRaw;   // usa a leitura crua (já com guarda de inválido no passo 2)
 
-        // 4. Calcula a média (usa todas as amostras quando o buffer está cheio)
-        if (ucUltraCnt == ULTRA_AVG_N) {
-            float fSum = 0.0f;
-            for (uint8_t k = 0U; k < ULTRA_AVG_N; k++) {
-                fSum += fUltraBuf[k];
-            }
-            fDistance = fSum / (float)ULTRA_AVG_N;
-        } else {
-            // Ainda não encheu o buffer; média parcial
-            float fSum = 0.0f;
-            for (uint8_t k = 0U; k < ucUltraCnt; k++) {
-                fSum += fUltraBuf[k];
-            }
-            fDistance = fSum / (float)ucUltraCnt;
-        }
-
-        // 5. Verifica se a distância média está na zona de alerta
+        // 5. Verifica se a distância (crua) está na zona de alerta
         if (fDistance >= fUltraMinCm && fDistance < fUltraAlertCm) {
             if (ucNearCount < ucUltraConfirm) ucNearCount++;
         } else {
             ucNearCount = 0U;   // zera imediatamente ao sair da zona
         }
 
-        // 6. Decisão do buzzer e parada de emergência
+        // 6. Decisão do buzzer por FAIXAS de distância (thresholds): cada faixa
+        //    toca um tom FIXO distinto -> dá pra "ouvir" a aproximação em degraus.
+        //    Mais perto = mais agudo. (A versão proporcional contínua ficou
+        //    comentada logo abaixo, caso queiram voltar.)
         uint16_t usFreq = 0;   // 0 = buzzer desligado
         if (ucNearCount >= ucUltraConfirm) {
-            if (fDistance < STOP_DISTANCE_CM) {
-                // Obstáculo muito próximo: parada imediata + tom máximo
-                osMessageQueuePut(qMotorCommandHandle, &xStopCmd, 1U, 0);
-                usFreq = 2000;
-            } else {
-                // Frequência proporcional à distância (20cm->500Hz, 5cm->2000Hz)
-                usFreq = (uint16_t)(500.0f + (fUltraAlertCm - fDistance) *
-                                    (1500.0f / (fUltraAlertCm - STOP_DISTANCE_CM)));
-                if (usFreq > 2000) usFreq = 2000;
+            if (fDistance < STOP_DISTANCE_CM) {          // < 5 cm: muito perto
+                osMessageQueuePut(qMotorCommandHandle, &xStopCmd, 1U, 0);  // para os motores
+                usFreq = 2000;                            // tom mais agudo
+            } else if (fDistance < 10.0f) {              // 5 a 10 cm
+                usFreq = 1500;
+            } else if (fDistance < 15.0f) {              // 10 a 15 cm
+                usFreq = 1000;
+            } else {                                      // 15 a 20 cm
+                usFreq = 600;                             // tom mais grave
             }
+
+            // --- Versão PROPORCIONAL contínua (DESATIVADA) ---
+            // if (fDistance < STOP_DISTANCE_CM) {
+            //     osMessageQueuePut(qMotorCommandHandle, &xStopCmd, 1U, 0);
+            //     usFreq = 2000;
+            // } else {
+            //     usFreq = (uint16_t)(500.0f + (fUltraAlertCm - fDistance) *
+            //                         (1500.0f / (fUltraAlertCm - STOP_DISTANCE_CM)));
+            //     if (usFreq > 2000) usFreq = 2000;
+            // }
         }
 
         // 7. Aplica a frequência no buzzer (TIM8_CH1)
