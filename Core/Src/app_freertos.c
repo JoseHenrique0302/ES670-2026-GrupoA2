@@ -156,7 +156,7 @@ typedef struct {
 #define BUMPER_EMERGENCY_ENABLED    1
 
 // LEDs RGB no TIM4 (PWM, ARR=999). Usados como indicadores:
-//   - Vermelho (CH1, PA11): aceso em modo MANUAL, apagado em AUTOM�?TICO.
+//   - Vermelho (CH1, PA11): aceso em modo MANUAL, apagado em AUTOMÁTICO.
 //   - Azul     (CH3, PB8) : aceso enquanto a calibração está em andamento.
 // Aceso=999, apagado=0. (Se a placa for ativa-baixa, troque LED_ON/LED_OFF.)
 #define LED_ON   999
@@ -710,9 +710,10 @@ void vStartTaskSegueLinha(void *argument)
 
 	    // Estado do detector de fim-de-pista (distingue cruzamento de marca de
 	    // fim pela DISTÂNCIA percorrida com os 5 sensores em branco, não pelo
-	    // tempo -> robusto a variação de velocidade). Calibrar na pista: maior
-	    // que a largura de um cruzamento e menor que a marca de fim.
-	    const float FINISH_WHITE_DIST_M = 0.12f;
+	    // tempo -> robusto a variação de velocidade). Tem que ficar MAIOR que a
+	    // largura de um cruzamento e MENOR que a faixa de fim (medida = 6 cm),
+	    // senão ele nunca acumula a distância em cima da faixa. 4 cm = meio termo.
+	    const float FINISH_WHITE_DIST_M = 0.04f;
 	    float   fAllWhiteStartDist = -1.0f;
 	    uint8_t ucFinished = 0U;
 
@@ -1231,7 +1232,7 @@ void vStartTaskTrocarModo(void *argument)
 	            ucCurrentMode = ucNewMode;
 	            gvSystemMode = ucCurrentMode;   // <- vTaskSegueLinha passa a (não) rodar o PID
 
-	            // LED vermelho indica o modo: ACESO em MANUAL, apagado em AUTOM�?TICO.
+	            // LED vermelho indica o modo: ACESO em MANUAL, apagado em AUTOMÁTICO.
 	            LED_MANUAL_SET(ucCurrentMode == MODE_MANUAL);
 
 	            // SEGURANÇA: ao sair do modo AUTÔNOMO a vTaskSegueLinha deixa de enviar
