@@ -1297,6 +1297,9 @@ void vStartTaskUltrassonicBuzzer(void *argument)
     const float   fUltraAlertCm  = 20.0f;     // distância para começar a apitar
     const float   fUltraMaxCm    = 400.0f;    // máximo plausível
     const uint8_t ucUltraConfirm = 2U;        // amostras consecutivas para confirmar alerta
+    const float   fSpreadMaxCm   = 5.0f;      // leitura só vale se as 5 amostras
+                                              // variarem menos que isto (estável =
+                                              // objeto real; no ar pula muito)
 
     // ucNearCount: debounce — exige N amostras consecutivas na zona de alerta
     // antes de apitar.
@@ -1358,11 +1361,19 @@ void vStartTaskUltrassonicBuzzer(void *argument)
         }
         fDistance = fTmp[ULTRA_MED_N / 2];   // elemento do meio = mediana
 
-        // 5. Verifica se a distância (mediana) está na zona de alerta
-        if (fDistance >= fUltraMinCm && fDistance < fUltraAlertCm) {
+        // 4b. GATE DE CONFIABILIDADE: as 5 amostras só valem se estiverem
+        //     consistentes (spread pequeno). fTmp está ORDENADO -> [0]=mín,
+        //     [N-1]=máx. No ar, as leituras espúrias pulam (mistura de 400
+        //     "longe" com picos curtos) -> spread enorme -> descartado (silêncio).
+        //     Com objeto real, ficam estáveis -> spread pequeno -> apita.
+        float   fSpread   = fTmp[ULTRA_MED_N - 1] - fTmp[0];
+        uint8_t ucReliable = (fSpread < fSpreadMaxCm) ? 1U : 0U;
+
+        // 5. Conta amostras na zona de alerta SOMENTE se a leitura for confiável.
+        if (ucReliable && fDistance >= fUltraMinCm && fDistance < fUltraAlertCm) {
             if (ucNearCount < ucUltraConfirm) ucNearCount++;
         } else {
-            ucNearCount = 0U;   // zera imediatamente ao sair da zona
+            ucNearCount = 0U;   // fora da zona OU leitura instável -> não apita
         }
 
         // 6. Decisão do buzzer por FAIXAS de distância (thresholds): cada faixa
