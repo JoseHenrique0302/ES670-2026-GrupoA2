@@ -268,9 +268,6 @@ const osThreadAttr_t vTaskUART_attributes = {
 osThreadId_t vTaskLCDHandle;
 const osThreadAttr_t vTaskLCD_attributes = {
   .name = "vTaskLCD",
-  // Normal (acima da vTaskUART=BelowNormal4): senão, ao conectar o celular, a
-  // task UART (RX + TX bloqueante ~88ms a 9600) matava de fome o LCD (Low) e ele
-  // congelava. É 1 Hz e rápido -> não atrapalha as tasks de tempo real.
   .priority = (osPriority_t) osPriorityNormal,
   .stack_size = 512 * 4
 };
