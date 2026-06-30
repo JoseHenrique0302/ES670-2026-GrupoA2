@@ -769,36 +769,65 @@ void vStartTaskSegueLinha(void *argument)
 	            if (ucIRBin[i]) { fError += (float)cWeights[i]; ucActive++; }
 	        }
 
-	        /* ---- 3b) Detecção de fim de pista: 5 sensores em branco por uma
-	         * DISTÂNCIA maior que a de um cruzamento -> para e trava os motores.
-	         * Cruzamentos (curtos) são apenas atravessados pelo fallback de
-	         * "linha perdida" abaixo, sem disparar o fim. ---- */
 	        if (!ucFinished)
 	        {
 	            if (ucActive == 0U)
 	            {
 	                float fDistNow = 0.0f;
+
 	                if (osMutexAcquire(mutexTelemetryHandle, pdMS_TO_TICKS(5)) == osOK)
 	                {
 	                    fDistNow = gvTelemetry.distTotal;
 	                    osMutexRelease(mutexTelemetryHandle);
 	                }
-	                if (fAllWhiteStartDist < 0.0f) fAllWhiteStartDist = fDistNow;
-	                if ((fDistNow - fAllWhiteStartDist) > FINISH_WHITE_DIST_M)
+
+	                // Primeira vez que perdeu a linha
+	                if (fAllWhiteStartDist < 0.0f)
+	                    fAllWhiteStartDist = fDistNow;
+
+	                // Enquanto estiver no branco, anda reto
+	                xCmd.fSpeedLeft  = fBaseSpeed;
+	                xCmd.fSpeedRight = fBaseSpeed;
+	                xCmd.ucCmdType   = 1;
+	                osMessageQueuePut(qMotorCommandHandle, &xCmd, 0, 0);
+
+	                // Após 12 cm, verifica novamente
+	                if ((fDistNow - fAllWhiteStartDist) >= FINISH_WHITE_DIST_M)
 	                {
-	                    ucFinished = 1U;
-	                    MotorCommand_t xStopCmd = {0.0f, 0.0f, 0}; // ucCmdType 0 = STOP
-	                    osMessageQueuePut(qMotorCommandHandle, &xStopCmd, 1U, 0);
-	                    // Pede a troca p/ MANUAL pela fila (vTaskTrocarModo segue
-	                    // sendo o único escritor de gvSystemMode, e já atualiza o
-	                    // LED) -> a volta termina travada, sem retomar sozinha.
-	                    uint8_t ucModeMsg = MODE_MANUAL;
-	                    osMessageQueuePut(qTrocaModoHandle, &ucModeMsg, 0U, 0);
+	                    // Continua tudo branco?
+	                    uint8_t ucStillWhite = 1U;
+
+	                    for (int i = 0; i < 5; i++)
+	                    {
+	                        if (ucIRBin[i])
+	                        {
+	                            ucStillWhite = 0U;
+	                            break;
+	                        }
+	                    }
+
+	                    if (ucStillWhite)
+	                    {
+	                        ucFinished = 1U;
+
+	                        MotorCommand_t xStopCmd = {0.0f, 0.0f, 0};
+	                        osMessageQueuePut(qMotorCommandHandle, &xStopCmd, 1U, 0);
+
+	                        uint8_t ucModeMsg = MODE_MANUAL;
+	                        osMessageQueuePut(qTrocaModoHandle, &ucModeMsg, 0U, 0);
+	                    }
+	                    else
+	                    {
+	                        // Encontrou a linha novamente
+	                        fAllWhiteStartDist = -1.0f;
+	                    }
 	                }
+
+	                continue;   // Não executa o PID enquanto estiver atravessando o branco
 	            }
 	            else
 	            {
-	                fAllWhiteStartDist = -1.0f; // achou a linha de novo: fim do cruzamento
+	                fAllWhiteStartDist = -1.0f;
 	            }
 	        }
 	        if (ucFinished)
