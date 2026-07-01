@@ -397,11 +397,11 @@ void MX_FREERTOS_Init(void) {
     // Ganhos PID padrão do seguir-linha. SEM isto ficavam em 0 (memset) e a
     // vTaskSegueLinha não gerava NENHUMA correção -> robô só andava reto.
     // Ajustáveis em tempo de execução via "SET_PID kp ki kd" (UART/app) -> dá
-    // pra afinar na pista SEM reflashar. Kp=0.6 ficou BRUSCO nas curvas; voltei
-    // p/ 0.5. Se quiser curva mais suave ainda, baixe Kp ou suba Kd pelo app.
-    gvPIDParams.fKp = 0.5f;
+    // pra afinar na pista SEM reflashar. Valor achado na pista: 0.9 / 0 / 0.5.
+    // >>> É AQUI que você muda o PADRÃO do seguidor de linha (só reflashar). <<<
+    gvPIDParams.fKp = 0.9f;
     gvPIDParams.fKi = 0.0f;
-    gvPIDParams.fKd = 0.15f;
+    gvPIDParams.fKd = 0.5f;
 
     // Limiar de binarização padrão (meio da escala de 12 bits). Fallback caso o
     // usuário rode o seguir-linha SEM calibrar. O ideal é sempre calibrar antes
@@ -905,7 +905,7 @@ void vStartTaskSegueLinha(void *argument)
 	        gvLineError = fError;
 
 	        // Ganhos PID atuais (ajustáveis por Bluetooth via mutexPIDParams)
-	        float fKp = 0.5f, fKi = 0.0f, fKd = 0.15f;  // fallback = defaults do init
+	        float fKp = 0.9f, fKi = 0.0f, fKd = 0.5f;   // fallback = defaults do init
 	        if (osMutexAcquire(mutexPIDParamsHandle, pdMS_TO_TICKS(5)) == osOK)
 	        {
 	            fKp = gvPIDParams.fKp;
