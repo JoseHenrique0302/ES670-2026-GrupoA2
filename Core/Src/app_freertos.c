@@ -159,7 +159,7 @@ typedef struct {
 // fraca -> o robô curva p/ a esquerda. Reforça a esquerda (>1.0). 1.0 = sem
 // trim. AJUSTAR na bancada: MANUAL "MOTOR 0.4 0.4" e subir/baixar até andar
 // reto (se ainda curvar p/ esquerda, aumenta; se curvar p/ direita, diminui).
-#define MOTOR_TRIM_LEFT    1.12f
+#define MOTOR_TRIM_LEFT    1.10f
 #define MOTOR_TRIM_RIGHT   1.00f
 
 // LEDs RGB no TIM4 (PWM, ARR=999). Usados como indicadores:
@@ -392,7 +392,7 @@ void MX_FREERTOS_Init(void) {
     // p/ 0.5. Se quiser curva mais suave ainda, baixe Kp ou suba Kd pelo app.
     gvPIDParams.fKp = 0.5f;
     gvPIDParams.fKi = 0.0f;
-    gvPIDParams.fKd = 0.15f;   // leve aumento p/ amortecer a oscilação
+    gvPIDParams.fKd = 0.12f;
 
     // Limiar de binarização padrão (meio da escala de 12 bits). Fallback caso o
     // usuário rode o seguir-linha SEM calibrar. O ideal é sempre calibrar antes
@@ -878,7 +878,7 @@ void vStartTaskSegueLinha(void *argument)
 	            fError = (fLastError >= 0.0f) ? 2.0f : -2.0f;
 
 	        // Ganhos PID atuais (ajustáveis por Bluetooth via mutexPIDParams)
-	        float fKp = 0.5f, fKi = 0.0f, fKd = 0.15f;  // fallback = defaults do init
+	        float fKp = 0.5f, fKi = 0.0f, fKd = 0.12f;  // fallback = defaults do init
 	        if (osMutexAcquire(mutexPIDParamsHandle, pdMS_TO_TICKS(5)) == osOK)
 	        {
 	            fKp = gvPIDParams.fKp;
