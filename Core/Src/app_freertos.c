@@ -159,7 +159,7 @@ typedef struct {
 // fraca -> o robô curva p/ a esquerda. Reforça a esquerda (>1.0). 1.0 = sem
 // trim. AJUSTAR na bancada: MANUAL "MOTOR 0.4 0.4" e subir/baixar até andar
 // reto (se ainda curvar p/ esquerda, aumenta; se curvar p/ direita, diminui).
-#define MOTOR_TRIM_LEFT    1.01f
+#define MOTOR_TRIM_LEFT    1.3f
 #define MOTOR_TRIM_RIGHT   1.00f
 
 // PID de velocidade do MOTOR (malha fechada com encoders). 0 = malha aberta
