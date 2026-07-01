@@ -155,6 +155,13 @@ typedef struct {
 // pull-up/down no PD2 na IOC e validar a chave.
 #define BUMPER_EMERGENCY_ENABLED    0
 
+// Trim de assimetria das rodas: p/ a MESMA potência, a roda esquerda anda mais
+// fraca -> o robô curva p/ a esquerda. Reforça a esquerda (>1.0). 1.0 = sem
+// trim. AJUSTAR na bancada: MANUAL "MOTOR 0.4 0.4" e subir/baixar até andar
+// reto (se ainda curvar p/ esquerda, aumenta; se curvar p/ direita, diminui).
+#define MOTOR_TRIM_LEFT    1.12f
+#define MOTOR_TRIM_RIGHT   1.00f
+
 // LEDs RGB no TIM4 (PWM, ARR=999). Usados como indicadores:
 //   - Vermelho (CH1, PA11): aceso em modo MANUAL, apagado em AUTOMATICO.
 //   - Azul     (CH3, PB8) : aceso enquanto a calibração está em andamento.
@@ -673,12 +680,19 @@ void vStartTaskMotor(void *argument)
 	                // anterior é mantido de propósito (parado não inverte sentido).
 	                gvMotorDirSign[0] = (xCmd.fSpeedLeft  >= 0.0f) ? 1 : -1;
 	                gvMotorDirSign[1] = (xCmd.fSpeedRight >= 0.0f) ? 1 : -1;
+
+	                // Trim de assimetria: reforca a roda esquerda (mais fraca);
+	                // aplica sobre o modulo da potencia e satura em 1.0.
+	                float fPwrLeft  = ((xCmd.fSpeedLeft  > 0) ? xCmd.fSpeedLeft  : -xCmd.fSpeedLeft ) * MOTOR_TRIM_LEFT;
+	                float fPwrRight = ((xCmd.fSpeedRight > 0) ? xCmd.fSpeedRight : -xCmd.fSpeedRight) * MOTOR_TRIM_RIGHT;
+	                if (fPwrLeft  > 1.0f) fPwrLeft  = 1.0f;
+	                if (fPwrRight > 1.0f) fPwrRight = 1.0f;
 	                vMotorEncoderControlMotor(MOTORENCODER_MOTOR_LEFT,
 	                    (xCmd.fSpeedLeft >= 0) ? MOTORENCODER_DIRECTION_FORWARD : MOTORENCODER_DIRECTION_BACKWARD,
-	                    (xCmd.fSpeedLeft > 0) ? xCmd.fSpeedLeft : -xCmd.fSpeedLeft);
+	                    fPwrLeft);
 	                vMotorEncoderControlMotor(MOTORENCODER_MOTOR_RIGHT,
 	                    (xCmd.fSpeedRight >= 0) ? MOTORENCODER_DIRECTION_FORWARD : MOTORENCODER_DIRECTION_BACKWARD,
-	                    (xCmd.fSpeedRight > 0) ? xCmd.fSpeedRight : -xCmd.fSpeedRight);
+	                    fPwrRight);
 	            }
 	        }
 	    }
