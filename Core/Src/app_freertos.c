@@ -738,7 +738,7 @@ void vStartTaskSegueLinha(void *argument)
 	    // tempo -> robusto a variação de velocidade). Tem que ficar MAIOR que a
 	    // largura de um cruzamento e MENOR que a faixa de fim (medida = 6 cm),
 	    // senão ele nunca acumula a distância em cima da faixa. 4 cm = meio termo.
-	    const float FINISH_WHITE_DIST_M = 0.03f;
+	    const float FINISH_WHITE_DIST_M = 0.07f;
 	    float   fAllWhiteStartDist = -1.0f;
 	    uint8_t ucFinished = 0U;
 
