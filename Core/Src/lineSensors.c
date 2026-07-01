@@ -145,6 +145,11 @@ void vLineSensors_v2_UpdateCalibration(void)
   }
 }
 
+uint16_t usLineSensors_v2_GetRawValue(lineSensorsEnum_t xSensor)
+{
+  return *xLineSensorsAttributes.pBuffer[xSensor];
+}
+
 float fLineSensors_v2_GetSensorValue(lineSensorsEnum_t xSensor)
 {
   float fRange;

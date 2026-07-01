@@ -162,6 +162,11 @@ typedef struct {
 #define MOTOR_TRIM_LEFT    1.00f
 #define MOTOR_TRIM_RIGHT   1.00f
 
+// Erro de linha: 1 = ANALÓGICO (centroide ponderado com os valores 0..1 dos
+// sensores -> erro CONTÍNUO e suave -> muito menos zig-zag). 0 = BINÁRIO (antigo,
+// média de pesos discretos -> erro em degraus -> zig-zag). Reflashar p/ comparar.
+#define LINE_ERROR_ANALOG   1
+
 // LEDs RGB no TIM4 (PWM, ARR=999). Usados como indicadores:
 //   - Vermelho (CH1, PA11): aceso em modo MANUAL, apagado em AUTOMATICO.
 //   - Azul     (CH3, PB8) : aceso enquanto a calibração está em andamento.
@@ -186,6 +191,10 @@ static volatile int32_t gvEncoderCounts[2] = {0, 0};   // GV1: [0]=esquerda, [1]
 // sinal (gravado em vStartTaskMotor) para saber se o delta de pulsos foi para
 // frente (+1) ou para trás (-1). Sem isto, andar de ré soma em vez de subtrair.
 static volatile int8_t gvMotorDirSign[2] = {1, 1};
+// Debug dos sensores p/ Live Expressions no debugger (ordem: LEFT..RIGHT).
+static volatile uint16_t gvSensorRaw[5];   // valor CRU do ADC por sensor (0..4095)
+static volatile float    gvSensorVal[5];   // valor NORMALIZADO por sensor (0..1)
+static volatile float    gvLineError;      // erro de linha entregue ao PID
 static CalibData_t gvCalibData;                        // GV3: dados de calibração
 static PidParams_t gvPIDParams;                        // GV2: ganhos PID atuais
 static TelemetryData_t gvTelemetry;                    // GV5: telemetria
@@ -747,6 +756,15 @@ void vStartTaskSegueLinha(void *argument)
 	        for (int i = 0; i < 5; i++)
 	            ucIRBin[i] = (fLineSensors_v2_GetSensorValue((lineSensorsEnum_t)i) > 0.5f) ? 1U : 0U;
 
+	        // Valores normalizados (0..1) + cru p/ o erro analogico e p/ debug.
+	        float fVal[5];
+	        for (int i = 0; i < 5; i++)
+	        {
+	            fVal[i] = fLineSensors_v2_GetSensorValue((lineSensorsEnum_t)i);
+	            gvSensorVal[i] = fVal[i];
+	            gvSensorRaw[i] = usLineSensors_v2_GetRawValue((lineSensorsEnum_t)i);
+	        }
+
 	        /* ---- 2) Bateria + parada de emergência por subtensão (sempre) ---- */
 	        uint16_t usBatteryRaw = usBatteryGetRawValue();
 	        uint8_t  ucBatteryPct = (uint8_t)usBatteryGetCharge();
@@ -867,10 +885,24 @@ void vStartTaskSegueLinha(void *argument)
 	            continue; // já parado/travado; não recalcula PID nem reenfileira comando
 	        }
 
+	        #if LINE_ERROR_ANALOG
+	        // ERRO ANALOGICO: centroide ponderado com os valores 0..1 -> erro
+	        // CONTINUO e suave (menos zig-zag). Linha perdida -> ultimo sentido.
 	        if (ucActive)
-	            fError /= (float)ucActive;
+	        {
+	            float fNum = 0.0f, fDen = 0.0f;
+	            for (int i = 0; i < 5; i++) { fNum += (float)cWeights[i] * fVal[i]; fDen += fVal[i]; }
+	            fError = (fDen > 0.0f) ? (fNum / fDen) : 0.0f;
+	        }
 	        else
 	            fError = (fLastError >= 0.0f) ? 2.0f : -2.0f;
+	        #else
+	        if (ucActive)
+	            fError /= (float)ucActive;   // media binaria (antigo)
+	        else
+	            fError = (fLastError >= 0.0f) ? 2.0f : -2.0f;
+	        #endif
+	        gvLineError = fError;
 
 	        // Ganhos PID atuais (ajustáveis por Bluetooth via mutexPIDParams)
 	        float fKp = 0.5f, fKi = 0.0f, fKd = 0.15f;  // fallback = defaults do init

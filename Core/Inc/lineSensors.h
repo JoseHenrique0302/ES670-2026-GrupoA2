@@ -95,6 +95,17 @@ void vLineSensors_v2_UpdateCalibration(void);
 float fLineSensors_v2_GetSensorValue(lineSensorsEnum_t xSensor);
 
 /**
+ * @brief Returns the RAW (uncalibrated) ADC value of a selected line sensor.
+ *
+ * Util p/ depurar no debugger: mostra o sensor respondendo (mudando) mesmo
+ * quando a calibracao (min/max) estiver ruim e o valor normalizado travado.
+ *
+ * @param xSensor Selected sensor identifier.
+ * @return Raw ADC value (0..4095).
+ */
+uint16_t usLineSensors_v2_GetRawValue(lineSensorsEnum_t xSensor);
+
+/**
  * @brief Sets the interpolation weights used by the line sensors.
  */
 void vLineSensors_v2_SetInterpolationWeigths(float fLeftWeigth,
