@@ -162,6 +162,16 @@ typedef struct {
 #define MOTOR_TRIM_LEFT    1.00f
 #define MOTOR_TRIM_RIGHT   1.00f
 
+// PID de velocidade do MOTOR (malha fechada com encoders). 0 = malha aberta
+// (duty direto, atual). 1 = fecha a malha por roda (compensa assimetria/carga).
+// ATENCAO: encoder de 20 PPR tem resolucao baixa -> deixar 0 p/ a demo, a menos
+// que o teste prove estavel. Saida = feedforward (duty) + PI corretor.
+#define MOTOR_PID_ENABLED   0
+#define MOTOR_PID_KP        0.0f    // ganho P (0 evita amplificar ruido de 20 PPR)
+#define MOTOR_PID_KI        0.01f   // ganho I (corrige regime permanente)
+#define MOTOR_PID_IMAX      40.0f   // anti-windup do integrador
+#define MOTOR_PID_MAX_CPP   1.0f    // pulsos/periodo(10ms) no duty=1 -> CALIBRAR!
+
 // Erro de linha: 1 = ANALÓGICO (centroide ponderado com os valores 0..1 dos
 // sensores -> erro CONTÍNUO e suave -> muito menos zig-zag). 0 = BINÁRIO (antigo,
 // média de pesos discretos -> erro em degraus -> zig-zag). Reflashar p/ comparar.
@@ -654,57 +664,95 @@ void vStartTaskCalibration(void *argument)
 void vStartTaskMotor(void *argument)
 {
   /* USER CODE BEGIN vStartTaskMotor */
-	    (void)argument;
-	    MotorCommand_t xCmd;
-	    const TickType_t xPeriod = pdMS_TO_TICKS(10);
-	    TickType_t xLastWakeTime = xTaskGetTickCount();
+    (void)argument;
+    MotorCommand_t xCmd;
+    MotorCommand_t xTarget = {0.0f, 0.0f, 0};   // ultimo alvo aplicado (0 = parado)
+    const TickType_t xPeriod = pdMS_TO_TICKS(10);
+    TickType_t xLastWakeTime = xTaskGetTickCount();
 
-	    for(;;)
-	    {
-	        vTaskDelayUntil(&xLastWakeTime, xPeriod);
+#if (MOTOR_PID_ENABLED != 0)
+    // Estado do PID de velocidade por roda (malha fechada com os encoders).
+    int32_t lLastCntL = gvEncoderCounts[0];
+    int32_t lLastCntR = gvEncoderCounts[1];
+    float   fIntegL = 0.0f, fIntegR = 0.0f;
+#endif
 
-	        // Verifica emergência
-	        uint32_t ulEmergencyFlags = osEventFlagsGet(evEmergencyHandle);
-	        if (ulEmergencyFlags & EMERGENCY_BIT)
-	        {
-	            vMotorEncoderControlMotor(MOTORENCODER_MOTOR_LEFT, MOTORENCODER_DIRECTION_STOP, 0.0f);
-	            vMotorEncoderControlMotor(MOTORENCODER_MOTOR_RIGHT, MOTORENCODER_DIRECTION_STOP, 0.0f);
-	            // Aguarda até que o bit seja limpo (opcional)
-	            osEventFlagsWait(evEmergencyHandle, EMERGENCY_BIT, osFlagsWaitAny | osFlagsNoClear, portMAX_DELAY);
-	            continue;
-	        }
+    for(;;)
+    {
+        vTaskDelayUntil(&xLastWakeTime, xPeriod);
 
-	        // Tenta receber comando da Q2 (timeout de 50ms)
-	        if (osMessageQueueGet(qMotorCommandHandle, &xCmd, NULL, pdMS_TO_TICKS(50)) == osOK)
-	        {
-	            if (xCmd.ucCmdType == 0) // STOP
-	            {
-	                vMotorEncoderControlMotor(MOTORENCODER_MOTOR_LEFT, MOTORENCODER_DIRECTION_STOP, 0.0f);
-	                vMotorEncoderControlMotor(MOTORENCODER_MOTOR_RIGHT, MOTORENCODER_DIRECTION_STOP, 0.0f);
-	            }
-	            else
-	            {
-	                // Grava o sinal comandado por roda p/ a odometria (encoder de 1
-	                // canal não sabe a direção por hardware). No STOP, o sinal
-	                // anterior é mantido de propósito (parado não inverte sentido).
-	                gvMotorDirSign[0] = (xCmd.fSpeedLeft  >= 0.0f) ? 1 : -1;
-	                gvMotorDirSign[1] = (xCmd.fSpeedRight >= 0.0f) ? 1 : -1;
+        // Emergencia -> para e espera limpar.
+        if (osEventFlagsGet(evEmergencyHandle) & EMERGENCY_BIT)
+        {
+            vMotorEncoderControlMotor(MOTORENCODER_MOTOR_LEFT,  MOTORENCODER_DIRECTION_STOP, 0.0f);
+            vMotorEncoderControlMotor(MOTORENCODER_MOTOR_RIGHT, MOTORENCODER_DIRECTION_STOP, 0.0f);
+            osEventFlagsWait(evEmergencyHandle, EMERGENCY_BIT, osFlagsWaitAny | osFlagsNoClear, portMAX_DELAY);
+            continue;
+        }
 
-	                // Trim de assimetria: reforca a roda esquerda (mais fraca);
-	                // aplica sobre o modulo da potencia e satura em 1.0.
-	                float fPwrLeft  = ((xCmd.fSpeedLeft  > 0) ? xCmd.fSpeedLeft  : -xCmd.fSpeedLeft ) * MOTOR_TRIM_LEFT;
-	                float fPwrRight = ((xCmd.fSpeedRight > 0) ? xCmd.fSpeedRight : -xCmd.fSpeedRight) * MOTOR_TRIM_RIGHT;
-	                if (fPwrLeft  > 1.0f) fPwrLeft  = 1.0f;
-	                if (fPwrRight > 1.0f) fPwrRight = 1.0f;
-	                vMotorEncoderControlMotor(MOTORENCODER_MOTOR_LEFT,
-	                    (xCmd.fSpeedLeft >= 0) ? MOTORENCODER_DIRECTION_FORWARD : MOTORENCODER_DIRECTION_BACKWARD,
-	                    fPwrLeft);
-	                vMotorEncoderControlMotor(MOTORENCODER_MOTOR_RIGHT,
-	                    (xCmd.fSpeedRight >= 0) ? MOTORENCODER_DIRECTION_FORWARD : MOTORENCODER_DIRECTION_BACKWARD,
-	                    fPwrRight);
-	            }
-	        }
-	    }
+        // Pega comando novo (NAO bloqueia) e guarda como alvo persistente, para o
+        // laco rodar em periodo fixo (necessario p/ o PID de velocidade).
+        if (osMessageQueueGet(qMotorCommandHandle, &xCmd, NULL, 0) == osOK)
+            xTarget = xCmd;
+
+        if (xTarget.ucCmdType == 0)   // STOP
+        {
+            vMotorEncoderControlMotor(MOTORENCODER_MOTOR_LEFT,  MOTORENCODER_DIRECTION_STOP, 0.0f);
+            vMotorEncoderControlMotor(MOTORENCODER_MOTOR_RIGHT, MOTORENCODER_DIRECTION_STOP, 0.0f);
+#if (MOTOR_PID_ENABLED != 0)
+            fIntegL = 0.0f; fIntegR = 0.0f;
+            lLastCntL = gvEncoderCounts[0];
+            lLastCntR = gvEncoderCounts[1];
+#endif
+            continue;
+        }
+
+        // Sinal de direcao por roda p/ a odometria (encoder de 1 canal).
+        gvMotorDirSign[0] = (xTarget.fSpeedLeft  >= 0.0f) ? 1 : -1;
+        gvMotorDirSign[1] = (xTarget.fSpeedRight >= 0.0f) ? 1 : -1;
+
+        float fMagL = (xTarget.fSpeedLeft  > 0.0f) ? xTarget.fSpeedLeft  : -xTarget.fSpeedLeft;
+        float fMagR = (xTarget.fSpeedRight > 0.0f) ? xTarget.fSpeedRight : -xTarget.fSpeedRight;
+
+#if (MOTOR_PID_ENABLED != 0)
+        // --- MALHA FECHADA: PID de velocidade por roda ---
+        // Mede os pulsos deste periodo (proporcional a velocidade). Como o encoder
+        // e de 20 PPR (baixa resolucao), a saida = feedforward (duty comandado) +
+        // PI corretor lento -> compensa assimetria/carga sem depender de P forte.
+        int32_t lCntL = gvEncoderCounts[0];
+        int32_t lCntR = gvEncoderCounts[1];
+        float fMeasL = (float)(lCntL - lLastCntL);   // pulsos no periodo
+        float fMeasR = (float)(lCntR - lLastCntR);
+        lLastCntL = lCntL;
+        lLastCntR = lCntR;
+        float fTgtL = fMagL * MOTOR_PID_MAX_CPP;      // alvo em pulsos/periodo
+        float fTgtR = fMagR * MOTOR_PID_MAX_CPP;
+        float fErrL = fTgtL - fMeasL;
+        float fErrR = fTgtR - fMeasR;
+        fIntegL += fErrL; fIntegR += fErrR;
+        if (fIntegL >  MOTOR_PID_IMAX) fIntegL =  MOTOR_PID_IMAX;
+        if (fIntegL < -MOTOR_PID_IMAX) fIntegL = -MOTOR_PID_IMAX;
+        if (fIntegR >  MOTOR_PID_IMAX) fIntegR =  MOTOR_PID_IMAX;
+        if (fIntegR < -MOTOR_PID_IMAX) fIntegR = -MOTOR_PID_IMAX;
+        float fPwrLeft  = fMagL + MOTOR_PID_KP * fErrL + MOTOR_PID_KI * fIntegL;
+        float fPwrRight = fMagR + MOTOR_PID_KP * fErrR + MOTOR_PID_KI * fIntegR;
+#else
+        // --- MALHA ABERTA (atual): duty direto + trim de assimetria ---
+        float fPwrLeft  = fMagL * MOTOR_TRIM_LEFT;
+        float fPwrRight = fMagR * MOTOR_TRIM_RIGHT;
+#endif
+        if (fPwrLeft  < 0.0f) fPwrLeft  = 0.0f;
+        if (fPwrLeft  > 1.0f) fPwrLeft  = 1.0f;
+        if (fPwrRight < 0.0f) fPwrRight = 0.0f;
+        if (fPwrRight > 1.0f) fPwrRight = 1.0f;
+
+        vMotorEncoderControlMotor(MOTORENCODER_MOTOR_LEFT,
+            (xTarget.fSpeedLeft >= 0.0f) ? MOTORENCODER_DIRECTION_FORWARD : MOTORENCODER_DIRECTION_BACKWARD,
+            fPwrLeft);
+        vMotorEncoderControlMotor(MOTORENCODER_MOTOR_RIGHT,
+            (xTarget.fSpeedRight >= 0.0f) ? MOTORENCODER_DIRECTION_FORWARD : MOTORENCODER_DIRECTION_BACKWARD,
+            fPwrRight);
+    }
 
   /* USER CODE END vStartTaskMotor */
 }
@@ -741,11 +789,10 @@ void vStartTaskSegueLinha(void *argument)
 	    const float FINISH_WHITE_DIST_M = 0.07f;
 	    float   fAllWhiteStartDist = -1.0f;
 	    uint8_t ucFinished = 0U;
-	    // Cruzamento: dispara com >= CROSS_ACTIVE_MIN sensores no preto e
+	    // Cruzamento: detectado por MEIO+PONTA dos sensores (ver o laco) e
 	    // LATCHA reto por CROSS_LATCH_DIST_M metros (os sensores nao chegam
 	    // juntos na perpendicular, entao commita reto ate passar).
-	    const uint8_t CROSS_ACTIVE_MIN   = 3U;
-	    const float   CROSS_LATCH_DIST_M = 0.05f;
+		    const float   CROSS_LATCH_DIST_M = 0.05f;
 	    float   fCrossLatchDist = -1.0f;
 
 	    const TickType_t xPeriod = pdMS_TO_TICKS(TASK_PERIOD_SENSORS); // 50 ms
@@ -822,7 +869,11 @@ void vStartTaskSegueLinha(void *argument)
 	            if (osMutexAcquire(mutexTelemetryHandle, pdMS_TO_TICKS(5)) == osOK)
 	            { fDistCross = gvTelemetry.distTotal; osMutexRelease(mutexTelemetryHandle); }
 
-	            if (fCrossLatchDist < 0.0f && ucActive >= CROSS_ACTIVE_MIN)
+	            // Cruzamento = MEIO (sensor 2) na linha E uma PONTA (0 ou 4) tambem
+            // vendo linha (a perpendicular chegou na borda). Curva fechada
+            // NAO dispara (ali o meio sai da linha).
+            uint8_t ucCross = ucIRBin[2] && (ucIRBin[0] || ucIRBin[4]);
+            if (fCrossLatchDist < 0.0f && ucCross)
 	                fCrossLatchDist = fDistCross;   // comeca o latch
 
 	            if (fCrossLatchDist >= 0.0f)
