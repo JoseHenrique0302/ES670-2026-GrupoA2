@@ -166,7 +166,12 @@ typedef struct {
 // (duty direto, atual). 1 = fecha a malha por roda (compensa assimetria/carga).
 // ATENCAO: encoder de 20 PPR tem resolucao baixa -> deixar 0 p/ a demo, a menos
 // que o teste prove estavel. Saida = feedforward (duty) + PI corretor.
-#define MOTOR_PID_ENABLED   1
+// >>> MANTER EM 0: com a malha fechada ligada o trim MOTOR_TRIM_LEFT (que reforca
+// a roda esquerda mais fraca) FICA DESLIGADO e o corretor PI e fraco demais
+// (KP=0.01/KI=0.001/IMAX=40 -> no maximo +0.04 de duty) p/ vencer o atrito
+// estatico. Resultado: no duty baixo (0.3) a roda esquerda as vezes NAO arranca
+// (intermitente). Em 0, o ramo de malha aberta aplica o trim de 1.3x e ela parte. <<<
+#define MOTOR_PID_ENABLED   0
 #define MOTOR_PID_KP        0.01f    // ganho P (0 evita amplificar ruido de 20 PPR)
 #define MOTOR_PID_KI        0.001f   // ganho I (corrige regime permanente)
 #define MOTOR_PID_IMAX      40.0f   // anti-windup do integrador
