@@ -1457,7 +1457,6 @@ void vStartTaskUltrassonicBuzzer(void *argument)
     // Abordagem escolhida: usa o driver distanceSensor.c (captura por DMA).
     const TickType_t xPeriod = pdMS_TO_TICKS(TASK_PERIOD_ULTRASONIC);
     TickType_t xLastWakeTime = xTaskGetTickCount();
-    MotorCommand_t xStopCmd = {0.0f, 0.0f, 0};   // ucCmdType 0 = STOP
     float fDistance;
 
     // Buzzer no TIM8_CH1: clock do timer = 170MHz/170 = 1 MHz (prescaler 170-1).
@@ -1504,9 +1503,6 @@ void vStartTaskUltrassonicBuzzer(void *argument)
         if (fRaw < fUltraMinCm || fRaw > fUltraMaxCm) {
             fRaw = fUltraMaxCm;
         }
-
-        HAL_GPIO_WritePin(LD2_GPIO_Port, LD2_Pin, 1);
-        osEventFlagsSet(evEmergencyHandle, EMERGENCY_BIT);
 
         // 3+4. MÉDIA MÓVEL (DESATIVADA — mantida comentada p/ referência).
         // fUltraBuf[ucUltraIdx] = fRaw;
@@ -1556,7 +1552,10 @@ void vStartTaskUltrassonicBuzzer(void *argument)
         //    comentada logo abaixo, caso queiram voltar.)
         uint16_t usFreq = 0;   // 0 = buzzer desligado
         if (ucNearCount >= ucUltraConfirm) {
-            if (fDistance <= STOP_DISTANCE_CM) {          // < 5 cm: muito perto
+            if (fDistance <= STOP_DISTANCE_CM) {          // <= STOP_DISTANCE_CM (7 cm): muito perto
+            	// Emergência SÓ aqui: fDistance é a MEDIANA de 5 amostras e este
+            	// ramo só roda com ucReliable (spread < 5 cm) + 2 confirmações ->
+            	// leitura flutuante do eco NÃO dispara mais a event flag.
             	HAL_GPIO_WritePin(LD2_GPIO_Port, LD2_Pin, 1);
             	osEventFlagsSet(evEmergencyHandle, EMERGENCY_BIT);
                 usFreq = 2000;                            // tom mais agudo
