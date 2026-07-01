@@ -770,7 +770,7 @@ void vStartTaskSegueLinha(void *argument)
 	    (void)argument;
 	    MotorCommand_t xCmd;
 	    uint8_t  ucIRBin[5];
-	    const int8_t cWeights[5] = {-2, -1, 0, 1, 2};
+	    const int8_t cWeights[5] = {-0.5, -1, 0, 1, 0.5};
 
 	    // Parâmetros do controle de seguimento (ajustáveis)
 	    const float fBaseSpeed   = 0.35f;   // duty base (0..1) das rodas
@@ -952,11 +952,46 @@ void vStartTaskSegueLinha(void *argument)
 	                fAllWhiteStartDist = -1.0f;
 	            }
 	        }
-	        if (ucFinished)
+
+	        // Variáveis estáticas ou locais (declare fora do loop, mas dentro da função)
+	        static uint32_t ulWhiteStartTick = 0;
+	        static uint8_t  ucWhiteDetected = 0;
+
+	        // Dentro do loop for(;;), após a leitura dos sensores:
+	        if (ucIRBin[0] == 0 || ucIRBin[4] == 0)   // algum extremo em branco
 	        {
-	            fIntegral  = 0.0f;
-	            fLastError = 0.0f;
-	            continue; // já parado/travado; não recalcula PID nem reenfileira comando
+	            if (ucWhiteDetected == 0)
+	            {
+	                ucWhiteDetected = 1;
+	                ulWhiteStartTick = xTaskGetTickCount();
+	            }
+	            else
+	            {
+	                if ((xTaskGetTickCount() - ulWhiteStartTick) >= pdMS_TO_TICKS(500))
+	                {
+	                    // Para os motores
+	                    MotorCommand_t xStopCmd = {0.0f, 0.0f, 0};
+	                    osMessageQueuePut(qMotorCommandHandle, &xStopCmd, 1U, 0);
+
+	                    // Muda para modo manual
+	                    uint8_t ucModeMsg = MODE_MANUAL;
+	                    osMessageQueuePut(qTrocaModoHandle, &ucModeMsg, 0U, 0);
+
+	                    // Reseta estado
+	                    ucWhiteDetected = 0;
+	                    ulWhiteStartTick = 0;
+	                    fIntegral = 0.0f;
+	                    fLastError = 0.0f;
+
+	                    continue;  // pula o PID
+	                }
+	            }
+	        }
+	        else
+	        {
+	            // Se sair do branco antes do tempo, reseta
+	            ucWhiteDetected = 0;
+	            ulWhiteStartTick = 0;
 	        }
 
 	        #if LINE_ERROR_ANALOG
@@ -976,6 +1011,7 @@ void vStartTaskSegueLinha(void *argument)
 	        else
 	            fError = (fLastError >= 0.0f) ? 2.0f : -2.0f;
 	        #endif
+
 	        gvLineError = fError;
 
 	        // Ganhos PID atuais (ajustáveis por Bluetooth via mutexPIDParams)
