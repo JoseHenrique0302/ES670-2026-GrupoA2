@@ -136,7 +136,7 @@ typedef struct {
 #define MAX_ENCODER_COUNTS      1000000UL
 #define MIN_BATTERY_VOLTAGE_MV  5500   // 5.5V (legado, não usado)
 #define BATTERY_MIN_PCT         10U    // emergência se carga < 10%
-#define STOP_DISTANCE_CM        5.0f
+#define STOP_DISTANCE_CM        7.0f
 
 
 /* USER CODE END PTD */
@@ -209,6 +209,11 @@ static CalibData_t gvCalibData;                        // GV3: dados de calibra�
 static PidParams_t gvPIDParams;                        // GV2: ganhos PID atuais
 static TelemetryData_t gvTelemetry;                    // GV5: telemetria
 static volatile uint32_t g_ultrasonicEchoTicks = 0;    // GV4: tempo do eco em ticks
+// Obstáculo à frente detectado pelo ultrassom (< STOP_DISTANCE_CM). A vTaskUltraBuzz
+// seta/limpa esta flag e o vTaskMotor (autoridade final dos motores) trava as rodas
+// enquanto ela estiver em 1. Diferente de um STOP enfileirado, NÃO é sobrescrita
+// pelos comandos que a vTaskSegueLinha reposta a cada ciclo em modo AUTO.
+static volatile uint8_t gvObstacleStop = 0;
 
 // Handle do LCD (definido em lcd_hd44780_i2c.c, mas declarado aqui como extern)
 extern I2C_HandleTypeDef hi2c2;
@@ -695,6 +700,23 @@ void vStartTaskMotor(void *argument)
         if (osMessageQueueGet(qMotorCommandHandle, &xCmd, NULL, 0) == osOK)
             xTarget = xCmd;
 
+        // Obstáculo à frente (ultrassom < STOP_DISTANCE_CM): trava as rodas
+        // enquanto o objeto estiver perto. A fila continua sendo drenada acima
+        // (xTarget fica atualizado), então ao afastar o obstáculo o robô retoma
+        // o último comando. Isto vence o comando de "andar" que a vTaskSegueLinha
+        // reposta a cada ciclo em AUTO -> resolve o "buzzer toca mas não para".
+        if (gvObstacleStop)
+        {
+            vMotorEncoderControlMotor(MOTORENCODER_MOTOR_LEFT,  MOTORENCODER_DIRECTION_STOP, 0.0f);
+            vMotorEncoderControlMotor(MOTORENCODER_MOTOR_RIGHT, MOTORENCODER_DIRECTION_STOP, 0.0f);
+#if (MOTOR_PID_ENABLED != 0)
+            fIntegL = 0.0f; fIntegR = 0.0f;
+            lLastCntL = gvEncoderCounts[0];
+            lLastCntR = gvEncoderCounts[1];
+#endif
+            continue;
+        }
+
         if (xTarget.ucCmdType == 0)   // STOP
         {
             vMotorEncoderControlMotor(MOTORENCODER_MOTOR_LEFT,  MOTORENCODER_DIRECTION_STOP, 0.0f);
@@ -781,19 +803,12 @@ void vStartTaskSegueLinha(void *argument)
 	    float fIntegral = 0.0f;
 	    float fLastError = 0.0f;
 
-	    // Estado do detector de fim-de-pista (distingue cruzamento de marca de
-	    // fim pela DISTÂNCIA percorrida com os 5 sensores em branco, não pelo
-	    // tempo -> robusto a variação de velocidade). Tem que ficar MAIOR que a
-	    // largura de um cruzamento e MENOR que a faixa de fim (medida = 6 cm),
-	    // senão ele nunca acumula a distância em cima da faixa. 4 cm = meio termo.
+	    // Estado do detector de fim-de-pista: mede a DISTÂNCIA percorrida com os
+	    // 5 sensores em branco (não o tempo -> robusto a variação de velocidade)
+	    // para decidir que a pista acabou e parar/voltar a MANUAL.
 	    const float FINISH_WHITE_DIST_M = 0.05f;
 	    float   fAllWhiteStartDist = -1.0f;
 	    uint8_t ucFinished = 0U;
-	    // Cruzamento: detectado por MEIO+PONTA dos sensores (ver o laco) e
-	    // LATCHA reto por CROSS_LATCH_DIST_M metros (os sensores nao chegam
-	    // juntos na perpendicular, entao commita reto ate passar).
-		    const float   CROSS_LATCH_DIST_M = 0.05f;
-	    float   fCrossLatchDist = -1.0f;
 
 	    const TickType_t xPeriod = pdMS_TO_TICKS(TASK_PERIOD_SENSORS); // 50 ms
 	    TickType_t xLastWakeTime = xTaskGetTickCount();
@@ -848,7 +863,6 @@ void vStartTaskSegueLinha(void *argument)
 	            fLastError = 0.0f;
 	            ucFinished = 0U;
 	            fAllWhiteStartDist = -1.0f;
-	            fCrossLatchDist = -1.0f;
 	            continue;
 	        }
 
@@ -859,38 +873,6 @@ void vStartTaskSegueLinha(void *argument)
 	        for (int i = 0; i < 5; i++)
 	        {
 	            if (ucIRBin[i]) { fError += (float)cWeights[i]; ucActive++; }
-	        }
-
-	        // CRUZAMENTO (linha perpendicular): dispara cedo e LATCHA reto ate passar,
-	        // pois os 5 sensores nao chegam juntos -> senao tenta seguir e sai do trajeto.
-	        if (!ucFinished)
-	        {
-	            float fDistCross = 0.0f;
-	            if (osMutexAcquire(mutexTelemetryHandle, pdMS_TO_TICKS(5)) == osOK)
-	            { fDistCross = gvTelemetry.distTotal; osMutexRelease(mutexTelemetryHandle); }
-
-	            // Cruzamento = MEIO (sensor 2) na linha E uma PONTA (0 ou 4) tambem
-            // vendo linha (a perpendicular chegou na borda). Curva fechada
-            // NAO dispara (ali o meio sai da linha).
-            uint8_t ucCross = ucIRBin[2] && (ucIRBin[0] || ucIRBin[4]);
-            if (fCrossLatchDist < 0.0f && ucCross)
-	                fCrossLatchDist = fDistCross;   // comeca o latch
-
-	            if (fCrossLatchDist >= 0.0f)
-	            {
-	                if ((fDistCross - fCrossLatchDist) < CROSS_LATCH_DIST_M)
-	                {
-	                    fAllWhiteStartDist = -1.0f;   // faixa preta nao conta p/ fim
-	                    fLastError = 0.0f;
-	                    //xCmd.fSpeedLeft  = fCrossSpeed;
-	                    //xCmd.fSpeedRight = fCrossSpeed;
-	                    xCmd.ucCmdType   = 1;
-	                    osMessageQueuePut(qMotorCommandHandle, &xCmd, 0, 0);
-	                    continue;   // reto e devagar, sem PID, ate passar o cruzamento
-	                }
-	                else
-	                    fCrossLatchDist = -1.0f;   // passou a janela -> volta ao normal
-	            }
 	        }
 
 	        if (!ucFinished)
@@ -1457,7 +1439,6 @@ void vStartTaskUltrassonicBuzzer(void *argument)
     // Abordagem escolhida: usa o driver distanceSensor.c (captura por DMA).
     const TickType_t xPeriod = pdMS_TO_TICKS(TASK_PERIOD_ULTRASONIC);
     TickType_t xLastWakeTime = xTaskGetTickCount();
-    MotorCommand_t xStopCmd = {0.0f, 0.0f, 0};   // ucCmdType 0 = STOP
     float fDistance;
 
     // Buzzer no TIM8_CH1: clock do timer = 170MHz/170 = 1 MHz (prescaler 170-1).
@@ -1551,10 +1532,14 @@ void vStartTaskUltrassonicBuzzer(void *argument)
         //    toca um tom FIXO distinto -> dá pra "ouvir" a aproximação em degraus.
         //    Mais perto = mais agudo. (A versão proporcional contínua ficou
         //    comentada logo abaixo, caso queiram voltar.)
+        // Obstáculo confirmado a < STOP_DISTANCE_CM -> sinaliza o vTaskMotor p/
+        // travar as rodas (auto-limpa quando o objeto sai da zona). Substitui o
+        // antigo STOP enfileirado, que era sobrescrito pela vTaskSegueLinha.
+        gvObstacleStop = (ucNearCount >= ucUltraConfirm && fDistance < STOP_DISTANCE_CM) ? 1U : 0U;
+
         uint16_t usFreq = 0;   // 0 = buzzer desligado
         if (ucNearCount >= ucUltraConfirm) {
             if (fDistance < STOP_DISTANCE_CM) {          // < 5 cm: muito perto
-                osMessageQueuePut(qMotorCommandHandle, &xStopCmd, 1U, 0);  // para os motores
                 usFreq = 2000;                            // tom mais agudo
             } else if (fDistance < 10.0f) {              // 5 a 10 cm
                 usFreq = 1500;
