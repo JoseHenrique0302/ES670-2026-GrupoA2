@@ -399,9 +399,9 @@ void MX_FREERTOS_Init(void) {
     // Ajustáveis em tempo de execução via "SET_PID kp ki kd" (UART/app) -> dá
     // pra afinar na pista SEM reflashar. Valor achado na pista: 0.9 / 0 / 0.5.
     // >>> É AQUI que você muda o PADRÃO do seguidor de linha (só reflashar). <<<
-    gvPIDParams.fKp = 0.9f;
+    gvPIDParams.fKp = 0.85f;
     gvPIDParams.fKi = 0.0f;
-    gvPIDParams.fKd = 0.5f;
+    gvPIDParams.fKd = 0.55f;
 
     // Limiar de binarização padrão (meio da escala de 12 bits). Fallback caso o
     // usuário rode o seguir-linha SEM calibrar. O ideal é sempre calibrar antes
@@ -741,6 +741,12 @@ void vStartTaskSegueLinha(void *argument)
 	    const float FINISH_WHITE_DIST_M = 0.07f;
 	    float   fAllWhiteStartDist = -1.0f;
 	    uint8_t ucFinished = 0U;
+	    // Cruzamento: dispara com >= CROSS_ACTIVE_MIN sensores no preto e
+	    // LATCHA reto por CROSS_LATCH_DIST_M metros (os sensores nao chegam
+	    // juntos na perpendicular, entao commita reto ate passar).
+	    const uint8_t CROSS_ACTIVE_MIN   = 3U;
+	    const float   CROSS_LATCH_DIST_M = 0.05f;
+	    float   fCrossLatchDist = -1.0f;
 
 	    const TickType_t xPeriod = pdMS_TO_TICKS(TASK_PERIOD_SENSORS); // 50 ms
 	    TickType_t xLastWakeTime = xTaskGetTickCount();
@@ -795,6 +801,7 @@ void vStartTaskSegueLinha(void *argument)
 	            fLastError = 0.0f;
 	            ucFinished = 0U;
 	            fAllWhiteStartDist = -1.0f;
+	            fCrossLatchDist = -1.0f;
 	            continue;
 	        }
 
@@ -807,16 +814,32 @@ void vStartTaskSegueLinha(void *argument)
 	            if (ucIRBin[i]) { fError += (float)cWeights[i]; ucActive++; }
 	        }
 
-	        // CRUZAMENTO de linha preta: >=4 sensores no preto = faixa larga
-	        // (perpendicular). Atravessa RETO e DEVAGAR, sem aplicar o PID (que
-	        // puxaria o robo para a linha perpendicular -> sai do trajeto).
-	        if (!ucFinished && ucActive >= 4U)
+	        // CRUZAMENTO (linha perpendicular): dispara cedo e LATCHA reto ate passar,
+	        // pois os 5 sensores nao chegam juntos -> senao tenta seguir e sai do trajeto.
+	        if (!ucFinished)
 	        {
-	            fAllWhiteStartDist = -1.0f;   // faixa preta nao conta p/ fim
-	            fLastError = 0.0f;
-	            xCmd.ucCmdType   = 1;
-	            osMessageQueuePut(qMotorCommandHandle, &xCmd, 0, 0);
-	            continue;
+	            float fDistCross = 0.0f;
+	            if (osMutexAcquire(mutexTelemetryHandle, pdMS_TO_TICKS(5)) == osOK)
+	            { fDistCross = gvTelemetry.distTotal; osMutexRelease(mutexTelemetryHandle); }
+
+	            if (fCrossLatchDist < 0.0f && ucActive >= CROSS_ACTIVE_MIN)
+	                fCrossLatchDist = fDistCross;   // comeca o latch
+
+	            if (fCrossLatchDist >= 0.0f)
+	            {
+	                if ((fDistCross - fCrossLatchDist) < CROSS_LATCH_DIST_M)
+	                {
+	                    fAllWhiteStartDist = -1.0f;   // faixa preta nao conta p/ fim
+	                    fLastError = 0.0f;
+	                    xCmd.fSpeedLeft  = fCrossSpeed;
+	                    xCmd.fSpeedRight = fCrossSpeed;
+	                    xCmd.ucCmdType   = 1;
+	                    osMessageQueuePut(qMotorCommandHandle, &xCmd, 0, 0);
+	                    continue;   // reto e devagar, sem PID, ate passar o cruzamento
+	                }
+	                else
+	                    fCrossLatchDist = -1.0f;   // passou a janela -> volta ao normal
+	            }
 	        }
 
 	        if (!ucFinished)
@@ -905,7 +928,7 @@ void vStartTaskSegueLinha(void *argument)
 	        gvLineError = fError;
 
 	        // Ganhos PID atuais (ajustáveis por Bluetooth via mutexPIDParams)
-	        float fKp = 0.9f, fKi = 0.0f, fKd = 0.5f;   // fallback = defaults do init
+	        float fKp = 0.85f, fKi = 0.0f, fKd = 0.55f; // fallback = defaults do init
 	        if (osMutexAcquire(mutexPIDParamsHandle, pdMS_TO_TICKS(5)) == osOK)
 	        {
 	            fKp = gvPIDParams.fKp;
