@@ -113,7 +113,7 @@ typedef struct {
 #define BUTTON_ENTER_BIT (1 << 4)
 
 // Definição das prioridades e períodos (em ms)
-#define TASK_PERIOD_SENSORS    50
+#define TASK_PERIOD_SENSORS    10
 #define TASK_PERIOD_ODOMETRY   50
 #define TASK_PERIOD_LINE_PID   100
 #define TASK_PERIOD_BUTTONS    50
@@ -392,7 +392,7 @@ void MX_FREERTOS_Init(void) {
     // p/ 0.5. Se quiser curva mais suave ainda, baixe Kp ou suba Kd pelo app.
     gvPIDParams.fKp = 0.5f;
     gvPIDParams.fKi = 0.0f;
-    gvPIDParams.fKd = 0.10f;
+    gvPIDParams.fKd = 0.15f;
 
     // Limiar de binarização padrão (meio da escala de 12 bits). Fallback caso o
     // usuário rode o seguir-linha SEM calibrar. O ideal é sempre calibrar antes
@@ -716,10 +716,9 @@ void vStartTaskSegueLinha(void *argument)
 	    const int8_t cWeights[5] = {-2, -1, 0, 1, 2};
 
 	    // Parâmetros do controle de seguimento (ajustáveis)
-	    const float fBaseSpeed   = 0.60f;   // duty base (0..1) das rodas
-	    const float fCrossSpeed  = 0.4f;   // duty (mais devagar) ao atravessar cruzamento
-	    const float fTurnLimit   = 0.75f;   // limite de correção (mantém duty >= 0)
-	    const float fIntegralMax = 50.0f;   // anti-windup do integrador
+	    const float fBaseSpeed   = 0.40f;   // duty base (0..1) das rodas
+	    const float fTurnLimit   = 0.7f;   // limite de correção (mantém duty >= 0)
+	    const float fIntegralMax = 120.0f;   // anti-windup do integrador
 
 	    // Estado do PID de linha (saída SIMÉTRICA: vira p/ esquerda e direita)
 	    float fIntegral = 0.0f;
@@ -797,8 +796,6 @@ void vStartTaskSegueLinha(void *argument)
 	        {
 	            fAllWhiteStartDist = -1.0f;   // faixa preta nao conta p/ fim
 	            fLastError = 0.0f;
-	            xCmd.fSpeedLeft  = fCrossSpeed;
-	            xCmd.fSpeedRight = fCrossSpeed;
 	            xCmd.ucCmdType   = 1;
 	            osMessageQueuePut(qMotorCommandHandle, &xCmd, 0, 0);
 	            continue;
@@ -821,8 +818,6 @@ void vStartTaskSegueLinha(void *argument)
 	                    fAllWhiteStartDist = fDistNow;
 
 	                // Enquanto estiver no branco, anda reto
-	                xCmd.fSpeedLeft  = fCrossSpeed;   // atravessa reto e devagar
-	                xCmd.fSpeedRight = fCrossSpeed;
 	                xCmd.ucCmdType   = 1;
 	                osMessageQueuePut(qMotorCommandHandle, &xCmd, 0, 0);
 
@@ -878,7 +873,7 @@ void vStartTaskSegueLinha(void *argument)
 	            fError = (fLastError >= 0.0f) ? 2.0f : -2.0f;
 
 	        // Ganhos PID atuais (ajustáveis por Bluetooth via mutexPIDParams)
-	        float fKp = 0.5f, fKi = 0.0f, fKd = 0.10f;  // fallback = defaults do init
+	        float fKp = 0.5f, fKi = 0.0f, fKd = 0.15f;  // fallback = defaults do init
 	        if (osMutexAcquire(mutexPIDParamsHandle, pdMS_TO_TICKS(5)) == osOK)
 	        {
 	            fKp = gvPIDParams.fKp;
