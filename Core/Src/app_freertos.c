@@ -153,7 +153,7 @@ typedef struct {
 // NÃO seta a emergência — evita TRAVAR o robô se o PD2 estiver flutuando/sem pull
 // (a emergência nunca é limpa e congela o vTaskMotor). Religar (1) só após pôr
 // pull-up/down no PD2 na IOC e validar a chave.
-#define BUMPER_EMERGENCY_ENABLED    0
+#define BUMPER_EMERGENCY_ENABLED    1
 
 // Trim de assimetria das rodas: p/ a MESMA potência, a roda esquerda anda mais
 // fraca -> o robô curva p/ a esquerda. Reforça a esquerda (>1.0). 1.0 = sem
@@ -166,9 +166,9 @@ typedef struct {
 // (duty direto, atual). 1 = fecha a malha por roda (compensa assimetria/carga).
 // ATENCAO: encoder de 20 PPR tem resolucao baixa -> deixar 0 p/ a demo, a menos
 // que o teste prove estavel. Saida = feedforward (duty) + PI corretor.
-#define MOTOR_PID_ENABLED   0
-#define MOTOR_PID_KP        0.0f    // ganho P (0 evita amplificar ruido de 20 PPR)
-#define MOTOR_PID_KI        0.01f   // ganho I (corrige regime permanente)
+#define MOTOR_PID_ENABLED   1
+#define MOTOR_PID_KP        0.01f    // ganho P (0 evita amplificar ruido de 20 PPR)
+#define MOTOR_PID_KI        0.001f   // ganho I (corrige regime permanente)
 #define MOTOR_PID_IMAX      40.0f   // anti-windup do integrador
 #define MOTOR_PID_MAX_CPP   1.0f    // pulsos/periodo(10ms) no duty=1 -> CALIBRAR!
 
@@ -773,8 +773,8 @@ void vStartTaskSegueLinha(void *argument)
 	    const int8_t cWeights[5] = {-2, -1, 0, 1, 2};
 
 	    // Parâmetros do controle de seguimento (ajustáveis)
-	    const float fBaseSpeed   = 0.40f;   // duty base (0..1) das rodas
-	    const float fTurnLimit   = 0.7f;   // limite de correção (mantém duty >= 0)
+	    const float fBaseSpeed   = 0.35f;   // duty base (0..1) das rodas
+	    const float fTurnLimit   = 0.6f;   // limite de correção (mantém duty >= 0)
 	    const float fIntegralMax = 120.0f;   // anti-windup do integrador
 
 	    // Estado do PID de linha (saída SIMÉTRICA: vira p/ esquerda e direita)
@@ -786,7 +786,7 @@ void vStartTaskSegueLinha(void *argument)
 	    // tempo -> robusto a variação de velocidade). Tem que ficar MAIOR que a
 	    // largura de um cruzamento e MENOR que a faixa de fim (medida = 6 cm),
 	    // senão ele nunca acumula a distância em cima da faixa. 4 cm = meio termo.
-	    const float FINISH_WHITE_DIST_M = 0.07f;
+	    const float FINISH_WHITE_DIST_M = 0.05f;
 	    float   fAllWhiteStartDist = -1.0f;
 	    uint8_t ucFinished = 0U;
 	    // Cruzamento: detectado por MEIO+PONTA dos sensores (ver o laco) e
@@ -882,8 +882,8 @@ void vStartTaskSegueLinha(void *argument)
 	                {
 	                    fAllWhiteStartDist = -1.0f;   // faixa preta nao conta p/ fim
 	                    fLastError = 0.0f;
-	                    xCmd.fSpeedLeft  = fCrossSpeed;
-	                    xCmd.fSpeedRight = fCrossSpeed;
+	                    //xCmd.fSpeedLeft  = fCrossSpeed;
+	                    //xCmd.fSpeedRight = fCrossSpeed;
 	                    xCmd.ucCmdType   = 1;
 	                    osMessageQueuePut(qMotorCommandHandle, &xCmd, 0, 0);
 	                    continue;   // reto e devagar, sem PID, ate passar o cruzamento
