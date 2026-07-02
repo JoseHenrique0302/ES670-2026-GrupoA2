@@ -781,14 +781,11 @@ void vStartTaskSegueLinha(void *argument)
 	    float fIntegral = 0.0f;
 	    float fLastError = 0.0f;
 
-	    // Estado do detector de fim-de-pista (distingue cruzamento de marca de
-	    // fim pela DISTÂNCIA percorrida com os 5 sensores em branco, não pelo
-	    // tempo -> robusto a variação de velocidade). Tem que ficar MAIOR que a
-	    // largura de um cruzamento e MENOR que a faixa de fim (medida = 6 cm),
-	    // senão ele nunca acumula a distância em cima da faixa. 4 cm = meio termo.
-	    const float FINISH_WHITE_DIST_M = 0.05f;
-	    float   fAllWhiteStartDist = -1.0f;
-	    uint8_t ucFinished = 0U;
+	    // Estado do detector de fim-de-pista: para quando os 5 sensores ficam
+	    // em branco por FINISH_WHITE_TICKS consecutivos (tempo, nao distancia).
+	    const TickType_t FINISH_WHITE_TICKS = pdMS_TO_TICKS(600);
+	    TickType_t xAllWhiteStartTick = 0;
+	    uint8_t    ucAllWhiteDetected = 0U;
 	    // Cruzamento: detectado por MEIO+PONTA dos sensores (ver o laco) e
 	    // LATCHA reto por CROSS_LATCH_DIST_M metros (os sensores nao chegam
 	    // juntos na perpendicular, entao commita reto ate passar).
@@ -846,8 +843,8 @@ void vStartTaskSegueLinha(void *argument)
 	            // são comandados via UART.
 	            fIntegral  = 0.0f;
 	            fLastError = 0.0f;
-	            ucFinished = 0U;
-	            fAllWhiteStartDist = -1.0f;
+	            ucAllWhiteDetected = 0U;
+	            xAllWhiteStartTick = 0;
 	            fCrossLatchDist = -1.0f;
 	            continue;
 	        }
@@ -863,7 +860,6 @@ void vStartTaskSegueLinha(void *argument)
 
 	        // CRUZAMENTO (linha perpendicular): dispara cedo e LATCHA reto ate passar,
 	        // pois os 5 sensores nao chegam juntos -> senao tenta seguir e sai do trajeto.
-	        if (!ucFinished)
 	        {
 	            float fDistCross = 0.0f;
 	            if (osMutexAcquire(mutexTelemetryHandle, pdMS_TO_TICKS(5)) == osOK)
@@ -880,7 +876,7 @@ void vStartTaskSegueLinha(void *argument)
 	            {
 	                if ((fDistCross - fCrossLatchDist) < CROSS_LATCH_DIST_M)
 	                {
-	                    fAllWhiteStartDist = -1.0f;   // faixa preta nao conta p/ fim
+	                    ucAllWhiteDetected = 0U;   // cruzamento nao conta p/ fim de pista
 	                    fLastError = 0.0f;
 	                    //xCmd.fSpeedLeft  = fCrossSpeed;
 	                    //xCmd.fSpeedRight = fCrossSpeed;
@@ -893,105 +889,37 @@ void vStartTaskSegueLinha(void *argument)
 	            }
 	        }
 
-	        if (!ucFinished)
+	        // FIM DE PISTA: os 5 sensores em branco por FINISH_WHITE_TICKS (600 ms)
+	        // seguidos -> para os motores e volta pro modo MANUAL. Enquanto aguarda
+	        // a confirmação, anda reto (não tenta reencontrar a linha via PID).
+	        if (ucActive == 0U)
 	        {
-	            if (ucActive == 0U)
+	            if (ucAllWhiteDetected == 0U)
 	            {
-	                float fDistNow = 0.0f;
-
-	                if (osMutexAcquire(mutexTelemetryHandle, pdMS_TO_TICKS(5)) == osOK)
-	                {
-	                    fDistNow = gvTelemetry.distTotal;
-	                    osMutexRelease(mutexTelemetryHandle);
-	                }
-
-	                // Primeira vez que perdeu a linha
-	                if (fAllWhiteStartDist < 0.0f)
-	                    fAllWhiteStartDist = fDistNow;
-
-	                // Enquanto estiver no branco, anda reto
-	                xCmd.ucCmdType   = 1;
-	                osMessageQueuePut(qMotorCommandHandle, &xCmd, 0, 0);
-
-	                // Após 12 cm, verifica novamente
-	                if ((fDistNow - fAllWhiteStartDist) >= FINISH_WHITE_DIST_M)
-	                {
-	                    // Continua tudo branco?
-	                    uint8_t ucStillWhite = 1U;
-
-	                    for (int i = 0; i < 5; i++)
-	                    {
-	                        if (ucIRBin[i])
-	                        {
-	                            ucStillWhite = 0U;
-	                            break;
-	                        }
-	                    }
-
-	                    if (ucStillWhite)
-	                    {
-	                        ucFinished = 1U;
-
-	                        MotorCommand_t xStopCmd = {0.0f, 0.0f, 0};
-	                        osMessageQueuePut(qMotorCommandHandle, &xStopCmd, 1U, 0);
-
-	                        uint8_t ucModeMsg = MODE_MANUAL;
-	                        osMessageQueuePut(qTrocaModoHandle, &ucModeMsg, 0U, 0);
-	                    }
-	                    else
-	                    {
-	                        // Encontrou a linha novamente
-	                        fAllWhiteStartDist = -1.0f;
-	                    }
-	                }
-
-	                continue;   // Não executa o PID enquanto estiver atravessando o branco
+	                ucAllWhiteDetected = 1U;
+	                xAllWhiteStartTick = xTaskGetTickCount();
 	            }
-	            else
+	            else if ((xTaskGetTickCount() - xAllWhiteStartTick) >= FINISH_WHITE_TICKS)
 	            {
-	                fAllWhiteStartDist = -1.0f;
+	                MotorCommand_t xStopCmd = {0.0f, 0.0f, 0};
+	                osMessageQueuePut(qMotorCommandHandle, &xStopCmd, 1U, 0);
+
+	                uint8_t ucModeMsg = MODE_MANUAL;
+	                osMessageQueuePut(qTrocaModoHandle, &ucModeMsg, 0U, 0);
+
+	                continue;   // troca de modo reseta o estado na próxima iteração
 	            }
-	        }
 
-	        // Variáveis estáticas ou locais (declare fora do loop, mas dentro da função)
-	        static uint32_t ulWhiteStartTick = 0;
-	        static uint8_t  ucWhiteDetected = 0;
-
-	        // Dentro do loop for(;;), após a leitura dos sensores:
-	        if (ucIRBin[0] == 0 || ucIRBin[4] == 0)   // algum extremo em branco
-	        {
-	            if (ucWhiteDetected == 0)
-	            {
-	                ucWhiteDetected = 1;
-	                ulWhiteStartTick = xTaskGetTickCount();
-	            }
-	            else
-	            {
-	                if ((xTaskGetTickCount() - ulWhiteStartTick) >= pdMS_TO_TICKS(1000))
-	                {
-	                    // Para os motores
-	                    MotorCommand_t xStopCmd = {0.0f, 0.0f, 0};
-	                    osMessageQueuePut(qMotorCommandHandle, &xStopCmd, 1U, 0);
-
-	                    // Muda para modo manual
-	                    uint8_t ucModeMsg = MODE_MANUAL;
-	                    osMessageQueuePut(qTrocaModoHandle, &ucModeMsg, 0U, 0);
-
-	                    // Reseta estado
-	                    ucWhiteDetected = 0;
-	                    ulWhiteStartTick = 0;
-	                    fIntegral = 0.0f;
-	                    fLastError = 0.0f;
-
-	                    continue;  // pula o PID
-	                }
-	            }
+	            // Ainda dentro da janela de confirmação: anda reto, sem PID.
+	            xCmd.ucCmdType   = 1;
+	            xCmd.fSpeedLeft  = fBaseSpeed;
+	            xCmd.fSpeedRight = fBaseSpeed;
+	            osMessageQueuePut(qMotorCommandHandle, &xCmd, 0, 0);
+	            continue;
 	        }
 	        else
 	        {
-	            // Se sair do branco antes do tempo, reseta
-	            ucWhiteDetected = 0;
-	            ulWhiteStartTick = 0;
+	            ucAllWhiteDetected = 0U;
 	        }
 
 	        #if LINE_ERROR_ANALOG
