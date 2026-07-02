@@ -783,7 +783,7 @@ void vStartTaskSegueLinha(void *argument)
 
 	    // Estado do detector de fim-de-pista: para quando os 5 sensores ficam
 	    // em branco por FINISH_WHITE_TICKS consecutivos (tempo, nao distancia).
-	    const TickType_t FINISH_WHITE_TICKS = pdMS_TO_TICKS(600);
+	    const TickType_t FINISH_WHITE_TICKS = pdMS_TO_TICKS(200);
 	    TickType_t xAllWhiteStartTick = 0;
 	    uint8_t    ucAllWhiteDetected = 0U;
 	    // Cruzamento: detectado por MEIO+PONTA dos sensores (ver o laco) e
@@ -943,7 +943,7 @@ void vStartTaskSegueLinha(void *argument)
 	        gvLineError = fError;
 
 	        // Ganhos PID atuais (ajustáveis por Bluetooth via mutexPIDParams)
-	        float fKp = 5.00f, fKi = 0.0f, fKd = 2.17f; // fallback = defaults do init
+	        float fKp = 5.10f, fKi = 0.0f, fKd = 2.17f; // fallback = defaults do init
 	        if (osMutexAcquire(mutexPIDParamsHandle, pdMS_TO_TICKS(5)) == osOK)
 	        {
 	            fKp = gvPIDParams.fKp;
