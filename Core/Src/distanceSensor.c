@@ -16,8 +16,14 @@ typedef struct {
 } distanceSensorAttributes_t;
 
 #define DISTANCESENSOR_CAPTURE_COUNT          2U
-#define DISTANCESENSOR_TRIGGER_COMPARE_VALUE  100U
-#define DISTANCESENSOR_DISTANCE_DIVISOR       58.0f
+/* Largura do pulso de trigger. Com o TIM20 agora a 100 kHz (prescaler 1700-1 =>
+ * 10 us/tick), compare 10 = ~100 us de pulso (>= 10 us que o HC-SR04 exige, e
+ * igual ao que funcionava antes). Era 100 quando o TIM20 estava a 1 MHz. */
+#define DISTANCESENSOR_TRIGGER_COMPARE_VALUE  10U
+/* Divisor acoplado ao prescaler do timer do ECO (TIM3).
+ * TIM3 a 100 kHz (prescaler 1700-1 => 10 us/tick): dist_cm = ticks*10/58 = ticks/5.8.
+ * (Antes, TIM3 a 1 MHz/1 us-tick, o divisor era 58.) */
+#define DISTANCESENSOR_DISTANCE_DIVISOR       5.8f
 
 static distanceSensorAttributes_t xDistanceSensorAttributes;
 

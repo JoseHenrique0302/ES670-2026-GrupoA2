@@ -83,7 +83,7 @@ typedef struct {
     uint8_t  batteryPct;       // bateria estimada (%)
     uint8_t  systemMode;       // MANUAL=0, AUTONOMOUS=1
     uint8_t  calibDone;        // flag: calibração concluída
-    uint8_t  reserved;         // alinhamento
+    uint16_t batteryRawAdc;    // raw ADC1 (0..4095) p/ diagnosticar a leitura de bateria
 } TelemetryData_t;
 
 // Estrutura para dados de calibração persistidos (GV3)
@@ -113,7 +113,7 @@ typedef struct {
 #define BUTTON_ENTER_BIT (1 << 4)
 
 // Definição das prioridades e períodos (em ms)
-#define TASK_PERIOD_SENSORS    50
+#define TASK_PERIOD_SENSORS    10
 #define TASK_PERIOD_ODOMETRY   50
 #define TASK_PERIOD_LINE_PID   100
 #define TASK_PERIOD_BUTTONS    50
@@ -136,17 +136,17 @@ typedef struct {
 #define MAX_ENCODER_COUNTS      1000000UL
 #define MIN_BATTERY_VOLTAGE_MV  5500   // 5.5V (legado, não usado)
 #define BATTERY_MIN_PCT         10U    // emergência se carga < 10%
-#define STOP_DISTANCE_CM        5.0f
+#define STOP_DISTANCE_CM        7.0f
 
 
 /* USER CODE END PTD */
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
-// Habilita o subsistema ultrassom + buzzer. Em 0, a vTaskUltraBuzz NÃO lê o
-// sensor nem aciona o buzzer e o trigger (TIM20/TIM3) nem é iniciado — evita o
-// alarme falso (pino de eco flutuando lê <5cm -> zona de STOP -> freq. máxima)
-// enquanto focamos no seguir-linha. Para REABILITAR no futuro: trocar para 1.
+// Habilita o subsistema ultrassom + buzzer. RELIGADO (1): a causa do alarme
+// falso (trigger a 10ms + estouro do timer do eco) foi corrigida (TIM3 e TIM20
+// a 1700-1/100kHz, divisor 5.8) e o buzzer usa mediana + gate de spread. Em 0,
+// a vTaskUltraBuzz silencia e nem inicia o sensor (p/ isolar o seguir-linha).
 #define ULTRASONIC_BUZZER_ENABLED   1
 
 // Bumper frontal (PD2/Switch_Fr) como parada de emergência. Em 0, o EXTI do PD2
@@ -155,8 +155,30 @@ typedef struct {
 // pull-up/down no PD2 na IOC e validar a chave.
 #define BUMPER_EMERGENCY_ENABLED    1
 
+// Trim de assimetria das rodas: p/ a MESMA potência, a roda esquerda anda mais
+// fraca -> o robô curva p/ a esquerda. Reforça a esquerda (>1.0). 1.0 = sem
+// trim. AJUSTAR na bancada: MANUAL "MOTOR 0.4 0.4" e subir/baixar até andar
+// reto (se ainda curvar p/ esquerda, aumenta; se curvar p/ direita, diminui).
+#define MOTOR_TRIM_LEFT    1.00f
+#define MOTOR_TRIM_RIGHT   1.00f
+
+// PID de velocidade do MOTOR (malha fechada com encoders). 0 = malha aberta
+// (duty direto, atual). 1 = fecha a malha por roda (compensa assimetria/carga).
+// ATENCAO: encoder de 20 PPR tem resolucao baixa -> deixar 0 p/ a demo, a menos
+// que o teste prove estavel. Saida = feedforward (duty) + PI corretor.
+#define MOTOR_PID_ENABLED   1
+#define MOTOR_PID_KP        0.01f    // ganho P (0 evita amplificar ruido de 20 PPR)
+#define MOTOR_PID_KI        0.001f   // ganho I (corrige regime permanente)
+#define MOTOR_PID_IMAX      40.0f   // anti-windup do integrador
+#define MOTOR_PID_MAX_CPP   1.0f    // pulsos/periodo(10ms) no duty=1 -> CALIBRAR!
+
+// Erro de linha: 1 = ANALÓGICO (centroide ponderado com os valores 0..1 dos
+// sensores -> erro CONTÍNUO e suave -> muito menos zig-zag). 0 = BINÁRIO (antigo,
+// média de pesos discretos -> erro em degraus -> zig-zag). Reflashar p/ comparar.
+#define LINE_ERROR_ANALOG   1
+
 // LEDs RGB no TIM4 (PWM, ARR=999). Usados como indicadores:
-//   - Vermelho (CH1, PA11): aceso em modo MANUAL, apagado em AUTOMÁTICO.
+//   - Vermelho (CH1, PA11): aceso em modo MANUAL, apagado em AUTOMATICO.
 //   - Azul     (CH3, PB8) : aceso enquanto a calibração está em andamento.
 // Aceso=999, apagado=0. (Se a placa for ativa-baixa, troque LED_ON/LED_OFF.)
 #define LED_ON   999
@@ -174,6 +196,15 @@ typedef struct {
 /* USER CODE BEGIN Variables */
 // Variáveis globais conforme diagrama
 static volatile int32_t gvEncoderCounts[2] = {0, 0};   // GV1: [0]=esquerda, [1]=direita
+// Sinal de direção comandada por roda ([0]=esquerda, [1]=direita): o encoder é
+// de 1 canal (só conta pulsos, sempre crescente) -> a odometria precisa deste
+// sinal (gravado em vStartTaskMotor) para saber se o delta de pulsos foi para
+// frente (+1) ou para trás (-1). Sem isto, andar de ré soma em vez de subtrair.
+static volatile int8_t gvMotorDirSign[2] = {1, 1};
+// Debug dos sensores p/ Live Expressions no debugger (ordem: LEFT..RIGHT).
+static volatile uint16_t gvSensorRaw[5];   // valor CRU do ADC por sensor (0..4095)
+static volatile float    gvSensorVal[5];   // valor NORMALIZADO por sensor (0..1)
+static volatile float    gvLineError;      // erro de linha entregue ao PID
 static CalibData_t gvCalibData;                        // GV3: dados de calibração
 static PidParams_t gvPIDParams;                        // GV2: ganhos PID atuais
 static TelemetryData_t gvTelemetry;                    // GV5: telemetria
@@ -263,7 +294,7 @@ const osThreadAttr_t vTaskUART_attributes = {
 osThreadId_t vTaskLCDHandle;
 const osThreadAttr_t vTaskLCD_attributes = {
   .name = "vTaskLCD",
-  .priority = (osPriority_t) osPriorityLow,
+  .priority = (osPriority_t) osPriorityNormal,
   .stack_size = 512 * 4
 };
 /* Definitions for vTaskTrocarModo */
@@ -375,10 +406,12 @@ void MX_FREERTOS_Init(void) {
 
     // Ganhos PID padrão do seguir-linha. SEM isto ficavam em 0 (memset) e a
     // vTaskSegueLinha não gerava NENHUMA correção -> robô só andava reto.
-    // Ajustáveis em tempo de execução via "SET_PID kp ki kd" (UART).
-    gvPIDParams.fKp = 0.5f;
+    // Ajustáveis em tempo de execução via "SET_PID kp ki kd" (UART/app) -> dá
+    // pra afinar na pista SEM reflashar. Valor achado na pista: 0.9 / 0 / 0.5.
+    // >>> É AQUI que você muda o PADRÃO do seguidor de linha (só reflashar). <<<
+    gvPIDParams.fKp = 5.00f;
     gvPIDParams.fKi = 0.0f;
-    gvPIDParams.fKd = 0.1f;
+    gvPIDParams.fKd = 2.17f;
 
     // Limiar de binarização padrão (meio da escala de 12 bits). Fallback caso o
     // usuário rode o seguir-linha SEM calibrar. O ideal é sempre calibrar antes
@@ -631,45 +664,95 @@ void vStartTaskCalibration(void *argument)
 void vStartTaskMotor(void *argument)
 {
   /* USER CODE BEGIN vStartTaskMotor */
-	    (void)argument;
-	    MotorCommand_t xCmd;
-	    const TickType_t xPeriod = pdMS_TO_TICKS(10);
-	    TickType_t xLastWakeTime = xTaskGetTickCount();
+    (void)argument;
+    MotorCommand_t xCmd;
+    MotorCommand_t xTarget = {0.0f, 0.0f, 0};   // ultimo alvo aplicado (0 = parado)
+    const TickType_t xPeriod = pdMS_TO_TICKS(10);
+    TickType_t xLastWakeTime = xTaskGetTickCount();
 
-	    for(;;)
-	    {
-	        vTaskDelayUntil(&xLastWakeTime, xPeriod);
+#if (MOTOR_PID_ENABLED != 0)
+    // Estado do PID de velocidade por roda (malha fechada com os encoders).
+    int32_t lLastCntL = gvEncoderCounts[0];
+    int32_t lLastCntR = gvEncoderCounts[1];
+    float   fIntegL = 0.0f, fIntegR = 0.0f;
+#endif
 
-	        // Verifica emergência
-	        uint32_t ulEmergencyFlags = osEventFlagsGet(evEmergencyHandle);
-	        if (ulEmergencyFlags & EMERGENCY_BIT)
-	        {
-	            vMotorEncoderControlMotor(MOTORENCODER_MOTOR_LEFT, MOTORENCODER_DIRECTION_STOP, 0.0f);
-	            vMotorEncoderControlMotor(MOTORENCODER_MOTOR_RIGHT, MOTORENCODER_DIRECTION_STOP, 0.0f);
-	            // Aguarda até que o bit seja limpo (opcional)
-	            osEventFlagsWait(evEmergencyHandle, EMERGENCY_BIT, osFlagsWaitAny | osFlagsNoClear, portMAX_DELAY);
-	            continue;
-	        }
+    for(;;)
+    {
+        vTaskDelayUntil(&xLastWakeTime, xPeriod);
 
-	        // Tenta receber comando da Q2 (timeout de 50ms)
-	        if (osMessageQueueGet(qMotorCommandHandle, &xCmd, NULL, pdMS_TO_TICKS(50)) == osOK)
-	        {
-	            if (xCmd.ucCmdType == 0) // STOP
-	            {
-	                vMotorEncoderControlMotor(MOTORENCODER_MOTOR_LEFT, MOTORENCODER_DIRECTION_STOP, 0.0f);
-	                vMotorEncoderControlMotor(MOTORENCODER_MOTOR_RIGHT, MOTORENCODER_DIRECTION_STOP, 0.0f);
-	            }
-	            else
-	            {
-	                vMotorEncoderControlMotor(MOTORENCODER_MOTOR_LEFT,
-	                    (xCmd.fSpeedLeft >= 0) ? MOTORENCODER_DIRECTION_FORWARD : MOTORENCODER_DIRECTION_BACKWARD,
-	                    (xCmd.fSpeedLeft > 0) ? xCmd.fSpeedLeft : -xCmd.fSpeedLeft);
-	                vMotorEncoderControlMotor(MOTORENCODER_MOTOR_RIGHT,
-	                    (xCmd.fSpeedRight >= 0) ? MOTORENCODER_DIRECTION_FORWARD : MOTORENCODER_DIRECTION_BACKWARD,
-	                    (xCmd.fSpeedRight > 0) ? xCmd.fSpeedRight : -xCmd.fSpeedRight);
-	            }
-	        }
-	    }
+        // Emergencia -> para e espera limpar.
+        if (osEventFlagsGet(evEmergencyHandle) & EMERGENCY_BIT)
+        {
+            vMotorEncoderControlMotor(MOTORENCODER_MOTOR_LEFT,  MOTORENCODER_DIRECTION_STOP, 0.0f);
+            vMotorEncoderControlMotor(MOTORENCODER_MOTOR_RIGHT, MOTORENCODER_DIRECTION_STOP, 0.0f);
+            osEventFlagsWait(evEmergencyHandle, EMERGENCY_BIT, osFlagsWaitAny | osFlagsNoClear, portMAX_DELAY);
+            continue;
+        }
+
+        // Pega comando novo (NAO bloqueia) e guarda como alvo persistente, para o
+        // laco rodar em periodo fixo (necessario p/ o PID de velocidade).
+        if (osMessageQueueGet(qMotorCommandHandle, &xCmd, NULL, 0) == osOK)
+            xTarget = xCmd;
+
+        if (xTarget.ucCmdType == 0)   // STOP
+        {
+            vMotorEncoderControlMotor(MOTORENCODER_MOTOR_LEFT,  MOTORENCODER_DIRECTION_STOP, 0.0f);
+            vMotorEncoderControlMotor(MOTORENCODER_MOTOR_RIGHT, MOTORENCODER_DIRECTION_STOP, 0.0f);
+#if (MOTOR_PID_ENABLED != 0)
+            fIntegL = 0.0f; fIntegR = 0.0f;
+            lLastCntL = gvEncoderCounts[0];
+            lLastCntR = gvEncoderCounts[1];
+#endif
+            continue;
+        }
+
+        // Sinal de direcao por roda p/ a odometria (encoder de 1 canal).
+        gvMotorDirSign[0] = (xTarget.fSpeedLeft  >= 0.0f) ? 1 : -1;
+        gvMotorDirSign[1] = (xTarget.fSpeedRight >= 0.0f) ? 1 : -1;
+
+        float fMagL = (xTarget.fSpeedLeft  > 0.0f) ? xTarget.fSpeedLeft  : -xTarget.fSpeedLeft;
+        float fMagR = (xTarget.fSpeedRight > 0.0f) ? xTarget.fSpeedRight : -xTarget.fSpeedRight;
+
+#if (MOTOR_PID_ENABLED != 0)
+        // --- MALHA FECHADA: PID de velocidade por roda ---
+        // Mede os pulsos deste periodo (proporcional a velocidade). Como o encoder
+        // e de 20 PPR (baixa resolucao), a saida = feedforward (duty comandado) +
+        // PI corretor lento -> compensa assimetria/carga sem depender de P forte.
+        int32_t lCntL = gvEncoderCounts[0];
+        int32_t lCntR = gvEncoderCounts[1];
+        float fMeasL = (float)(lCntL - lLastCntL);   // pulsos no periodo
+        float fMeasR = (float)(lCntR - lLastCntR);
+        lLastCntL = lCntL;
+        lLastCntR = lCntR;
+        float fTgtL = fMagL * MOTOR_PID_MAX_CPP;      // alvo em pulsos/periodo
+        float fTgtR = fMagR * MOTOR_PID_MAX_CPP;
+        float fErrL = fTgtL - fMeasL;
+        float fErrR = fTgtR - fMeasR;
+        fIntegL += fErrL; fIntegR += fErrR;
+        if (fIntegL >  MOTOR_PID_IMAX) fIntegL =  MOTOR_PID_IMAX;
+        if (fIntegL < -MOTOR_PID_IMAX) fIntegL = -MOTOR_PID_IMAX;
+        if (fIntegR >  MOTOR_PID_IMAX) fIntegR =  MOTOR_PID_IMAX;
+        if (fIntegR < -MOTOR_PID_IMAX) fIntegR = -MOTOR_PID_IMAX;
+        float fPwrLeft  = fMagL + MOTOR_PID_KP * fErrL + MOTOR_PID_KI * fIntegL;
+        float fPwrRight = fMagR + MOTOR_PID_KP * fErrR + MOTOR_PID_KI * fIntegR;
+#else
+        // --- MALHA ABERTA (atual): duty direto + trim de assimetria ---
+        float fPwrLeft  = fMagL * MOTOR_TRIM_LEFT;
+        float fPwrRight = fMagR * MOTOR_TRIM_RIGHT;
+#endif
+        if (fPwrLeft  < 0.0f) fPwrLeft  = 0.0f;
+        if (fPwrLeft  > 1.0f) fPwrLeft  = 1.0f;
+        if (fPwrRight < 0.0f) fPwrRight = 0.0f;
+        if (fPwrRight > 1.0f) fPwrRight = 1.0f;
+
+        vMotorEncoderControlMotor(MOTORENCODER_MOTOR_LEFT,
+            (xTarget.fSpeedLeft >= 0.0f) ? MOTORENCODER_DIRECTION_FORWARD : MOTORENCODER_DIRECTION_BACKWARD,
+            fPwrLeft);
+        vMotorEncoderControlMotor(MOTORENCODER_MOTOR_RIGHT,
+            (xTarget.fSpeedRight >= 0.0f) ? MOTORENCODER_DIRECTION_FORWARD : MOTORENCODER_DIRECTION_BACKWARD,
+            fPwrRight);
+    }
 
   /* USER CODE END vStartTaskMotor */
 }
@@ -687,16 +770,27 @@ void vStartTaskSegueLinha(void *argument)
 	    (void)argument;
 	    MotorCommand_t xCmd;
 	    uint8_t  ucIRBin[5];
-	    const int8_t cWeights[5] = {-2, -1, 0, 1, 2};
+	    const int8_t cWeights[5] = {-0.5, -1.0, 0, 1.0, 0.5};
 
 	    // Parâmetros do controle de seguimento (ajustáveis)
-	    const float fBaseSpeed   = 0.40f;   // duty base (0..1) das rodas
-	    const float fTurnLimit   = 0.90f;   // limite de correção (mantém duty >= 0)
-	    const float fIntegralMax = 50.0f;   // anti-windup do integrador
+	    const float fBaseSpeed   = 0.35f;   // duty base (0..1) das rodas
+	    const float fTurnLimit   = 0.35f;   // limite de correção (mantém duty >= 0)
+	    const float fIntegralMax = 120.0f;   // anti-windup do integrador
 
 	    // Estado do PID de linha (saída SIMÉTRICA: vira p/ esquerda e direita)
 	    float fIntegral = 0.0f;
 	    float fLastError = 0.0f;
+
+	    // Estado do detector de fim-de-pista: para quando os 5 sensores ficam
+	    // em branco por FINISH_WHITE_TICKS consecutivos (tempo, nao distancia).
+	    const TickType_t FINISH_WHITE_TICKS = pdMS_TO_TICKS(200);
+	    TickType_t xAllWhiteStartTick = 0;
+	    uint8_t    ucAllWhiteDetected = 0U;
+	    // Cruzamento: detectado por MEIO+PONTA dos sensores (ver o laco) e
+	    // LATCHA reto por CROSS_LATCH_DIST_M metros (os sensores nao chegam
+	    // juntos na perpendicular, entao commita reto ate passar).
+		    const float   CROSS_LATCH_DIST_M = 0.05f;
+	    float   fCrossLatchDist = -1.0f;
 
 	    const TickType_t xPeriod = pdMS_TO_TICKS(TASK_PERIOD_SENSORS); // 50 ms
 	    TickType_t xLastWakeTime = xTaskGetTickCount();
@@ -712,12 +806,22 @@ void vStartTaskSegueLinha(void *argument)
 	        for (int i = 0; i < 5; i++)
 	            ucIRBin[i] = (fLineSensors_v2_GetSensorValue((lineSensorsEnum_t)i) > 0.5f) ? 1U : 0U;
 
+	        // Valores normalizados (0..1) + cru p/ o erro analogico e p/ debug.
+	        float fVal[5];
+	        for (int i = 0; i < 5; i++)
+	        {
+	            fVal[i] = fLineSensors_v2_GetSensorValue((lineSensorsEnum_t)i);
+	            gvSensorVal[i] = fVal[i];
+	            gvSensorRaw[i] = usLineSensors_v2_GetRawValue((lineSensorsEnum_t)i);
+	        }
+
 	        /* ---- 2) Bateria + parada de emergência por subtensão (sempre) ---- */
 	        uint16_t usBatteryRaw = usBatteryGetRawValue();
 	        uint8_t  ucBatteryPct = (uint8_t)usBatteryGetCharge();
 	        if (osMutexAcquire(mutexTelemetryHandle, pdMS_TO_TICKS(5)) == osOK)
 	        {
 	            gvTelemetry.batteryPct = ucBatteryPct;
+	            gvTelemetry.batteryRawAdc = usBatteryRaw;
 	            osMutexRelease(mutexTelemetryHandle);
 	        }
 	        // Emergência por bateria fraca usando a PORCENTAGEM calibrada (battery.c).
@@ -725,15 +829,23 @@ void vStartTaskSegueLinha(void *argument)
 	        // comparava com 5500mV -> a condição era SEMPRE verdadeira, a emergência
 	        // ligava no 1º ciclo e os motores NUNCA rodavam. O guard usBatteryRaw>100
 	        // evita falso disparo no boot, antes do ADC/DMA converter (leitura ~0).
-	        if (usBatteryRaw > 100U && ucBatteryPct < BATTERY_MIN_PCT)
+	        // DESABILITADO p/ focar no seguir-linha: se a % da bateria calibrar errado,
+		// isto dispara a emergência e CONGELA o vTaskMotor (só sai com RIGHT) ->
+		// robô não anda em AUTO. Reabilitar só após validar a calibração da bateria.
+		if (0 && usBatteryRaw > 100U && ucBatteryPct < BATTERY_MIN_PCT)
 	            osEventFlagsSet(evEmergencyHandle, EMERGENCY_BIT);
 
 	        /* ---- 3) Controle de linha: só no modo AUTÔNOMO ---- */
 	        if (gvSystemMode != MODE_AUTONOMOUS)
 	        {
-	            // Modo MANUAL: zera estado do PID; os motores são comandados via UART.
+	            // Modo MANUAL: zera estado do PID e do detector de fim-de-pista,
+	            // para que a próxima volta autônoma recomece do zero; os motores
+	            // são comandados via UART.
 	            fIntegral  = 0.0f;
 	            fLastError = 0.0f;
+	            ucAllWhiteDetected = 0U;
+	            xAllWhiteStartTick = 0;
+	            fCrossLatchDist = -1.0f;
 	            continue;
 	        }
 
@@ -745,13 +857,93 @@ void vStartTaskSegueLinha(void *argument)
 	        {
 	            if (ucIRBin[i]) { fError += (float)cWeights[i]; ucActive++; }
 	        }
+
+	        // CRUZAMENTO (linha perpendicular): dispara cedo e LATCHA reto ate passar,
+	        // pois os 5 sensores nao chegam juntos -> senao tenta seguir e sai do trajeto.
+	        {
+	            float fDistCross = 0.0f;
+	            if (osMutexAcquire(mutexTelemetryHandle, pdMS_TO_TICKS(5)) == osOK)
+	            { fDistCross = gvTelemetry.distTotal; osMutexRelease(mutexTelemetryHandle); }
+
+	            // Cruzamento = MEIO (sensor 2) na linha E uma PONTA (0 ou 4) tambem
+            // vendo linha (a perpendicular chegou na borda). Curva fechada
+            // NAO dispara (ali o meio sai da linha).
+            uint8_t ucCross = ucIRBin[2] && (ucIRBin[0] || ucIRBin[4]);
+            if (fCrossLatchDist < 0.0f && ucCross)
+	                fCrossLatchDist = fDistCross;   // comeca o latch
+
+	            if (fCrossLatchDist >= 0.0f)
+	            {
+	                if ((fDistCross - fCrossLatchDist) < CROSS_LATCH_DIST_M)
+	                {
+	                    ucAllWhiteDetected = 0U;   // cruzamento nao conta p/ fim de pista
+	                    fLastError = 0.0f;
+	                    //xCmd.fSpeedLeft  = fCrossSpeed;
+	                    //xCmd.fSpeedRight = fCrossSpeed;
+	                    xCmd.ucCmdType   = 1;
+	                    osMessageQueuePut(qMotorCommandHandle, &xCmd, 0, 0);
+	                    continue;   // reto e devagar, sem PID, ate passar o cruzamento
+	                }
+	                else
+	                    fCrossLatchDist = -1.0f;   // passou a janela -> volta ao normal
+	            }
+	        }
+
+	        // FIM DE PISTA: os 5 sensores em branco por FINISH_WHITE_TICKS (600 ms)
+	        // seguidos -> para os motores e volta pro modo MANUAL. Enquanto aguarda
+	        // a confirmação, anda reto (não tenta reencontrar a linha via PID).
+	        if (ucActive == 0U)
+	        {
+	            if (ucAllWhiteDetected == 0U)
+	            {
+	                ucAllWhiteDetected = 1U;
+	                xAllWhiteStartTick = xTaskGetTickCount();
+	            }
+	            else if ((xTaskGetTickCount() - xAllWhiteStartTick) >= FINISH_WHITE_TICKS)
+	            {
+	                MotorCommand_t xStopCmd = {0.0f, 0.0f, 0};
+	                osMessageQueuePut(qMotorCommandHandle, &xStopCmd, 1U, 0);
+
+	                uint8_t ucModeMsg = MODE_MANUAL;
+	                osMessageQueuePut(qTrocaModoHandle, &ucModeMsg, 0U, 0);
+
+	                continue;   // troca de modo reseta o estado na próxima iteração
+	            }
+
+	            // Ainda dentro da janela de confirmação: anda reto, sem PID.
+	            xCmd.ucCmdType   = 1;
+	            xCmd.fSpeedLeft  = fBaseSpeed;
+	            xCmd.fSpeedRight = fBaseSpeed;
+	            osMessageQueuePut(qMotorCommandHandle, &xCmd, 0, 0);
+	            continue;
+	        }
+	        else
+	        {
+	            ucAllWhiteDetected = 0U;
+	        }
+
+	        #if LINE_ERROR_ANALOG
+	        // ERRO ANALOGICO: centroide ponderado com os valores 0..1 -> erro
+	        // CONTINUO e suave (menos zig-zag). Linha perdida -> ultimo sentido.
 	        if (ucActive)
-	            fError /= (float)ucActive;
+	        {
+	            float fNum = 0.0f, fDen = 0.0f;
+	            for (int i = 0; i < 5; i++) { fNum += (float)cWeights[i] * fVal[i]; fDen += fVal[i]; }
+	            fError = (fDen > 0.0f) ? (fNum / fDen) : 0.0f;
+	        }
 	        else
 	            fError = (fLastError >= 0.0f) ? 2.0f : -2.0f;
+	        #else
+	        if (ucActive)
+	            fError /= (float)ucActive;   // media binaria (antigo)
+	        else
+	            fError = (fLastError >= 0.0f) ? 2.0f : -2.0f;
+	        #endif
+
+	        gvLineError = fError;
 
 	        // Ganhos PID atuais (ajustáveis por Bluetooth via mutexPIDParams)
-	        float fKp = 0.04f, fKi = 0.01f, fKd = 0.0f;
+	        float fKp = 5.10f, fKi = 0.0f, fKd = 2.17f; // fallback = defaults do init
 	        if (osMutexAcquire(mutexPIDParamsHandle, pdMS_TO_TICKS(5)) == osOK)
 	        {
 	            fKp = gvPIDParams.fKp;
@@ -801,10 +993,10 @@ void vStartTaskOdometria(void *argument)
     static float fLastLeftCount = 0.0f, fLastRightCount = 0.0f;
 
     // Parâmetros geométricos do robô (em metros)
-    const float WHEEL_RADIUS = 0.0315f;        // raio da roda (diâmetro 63 mm / 2)
+    const float WHEEL_PERIMETER = 0.21f;       // perímetro MEDIDO da roda (substitui 2*pi*raio)
     const float HALF_WHEEL_BASE = 0.0665f;     // E = distância entre rodas / 2 (133 mm / 2)
     const float PPR = 20.0f;                   // pulsos por revolução (x1)
-    const float METERS_PER_TICK = (2.0f * 3.1415926535897932f * WHEEL_RADIUS) / PPR;
+    const float METERS_PER_TICK = WHEEL_PERIMETER / PPR;
 
     // Variáveis para média de velocidade
     static float fSpeedSum = 0.0f;
@@ -822,9 +1014,12 @@ void vStartTaskOdometria(void *argument)
       rightCount = gvEncoderCounts[1];
       taskEXIT_CRITICAL();
 
-      // 2. Incrementos em metros para cada roda
-      float fDeltaLeft  = (leftCount  - fLastLeftCount)  * METERS_PER_TICK;
-      float fDeltaRight = (rightCount - fLastRightCount) * METERS_PER_TICK;
+      // 2. Incrementos em metros para cada roda. O encoder só conta pulsos (1
+      // canal, sempre cresce); aplica-se o sinal da direção comandada
+      // (gvMotorDirSign, gravado em vStartTaskMotor) para que andar de ré
+      // decremente a pose em vez de somar como se fosse pra frente.
+      float fDeltaLeft  = (leftCount  - fLastLeftCount)  * METERS_PER_TICK * (float)gvMotorDirSign[0];
+      float fDeltaRight = (rightCount - fLastRightCount) * METERS_PER_TICK * (float)gvMotorDirSign[1];
       fLastLeftCount  = leftCount;
       fLastRightCount = rightCount;
       // 3. Cinemática diferencial
@@ -886,7 +1081,7 @@ void vStartTaskUART(void *argument)
     static uint8_t rxIndex = 0;
     TelemetryData_t telemetrySnap;
     char txBuffer[256];
-    const TickType_t xTelemetryPeriod = pdMS_TO_TICKS(1000);
+    const TickType_t xTelemetryPeriod = pdMS_TO_TICKS(800);
     TickType_t xLastTelemetryTime = xTaskGetTickCount();
 
     // Função interna para processar um byte recebido e montar comandos
@@ -921,7 +1116,10 @@ void vStartTaskUART(void *argument)
                     osMutexRelease(mutexPIDParamsHandle);
                 }
                 snprintf(txBuffer, sizeof(txBuffer), "PID:%.2f %.2f %.2f\r\n", kp, ki, kd);
+                // Responde nas duas UARTs: permite testar comandos pelo VCP do
+                // ST-Link (sem celular/HC-05) e ver a resposta no mesmo terminal.
                 HAL_UART_Transmit(&huart3, (uint8_t*)txBuffer, strlen(txBuffer), 100);
+                HAL_UART_Transmit(&hlpuart1, (uint8_t*)txBuffer, strlen(txBuffer), 100);
             }
             else if (strcmp((char*)rxBuffer, "MANUAL") == 0)
             {
@@ -987,11 +1185,16 @@ void vStartTaskUART(void *argument)
 	                osMutexRelease(mutexTelemetryHandle);
 	            }
 	            snprintf(txBuffer, sizeof(txBuffer),
-	                "X=%.2f Y=%.2f Th=%.2f V=%.2f Vavg=%.2f Dist=%.2f Bat=%u%% Mode=%u Calib=%u\r\n",
+	                "X=%.2f Y=%.2f Th=%.2f V=%.2f Vavg=%.2f Dist=%.2f Bat=%u%% BatRaw=%u Mode=%u Calib=%u\r\n",
 	                telemetrySnap.posX, telemetrySnap.posY, telemetrySnap.theta,
 	                telemetrySnap.speedCurrent, telemetrySnap.speedAverage, telemetrySnap.distTotal,
-	                telemetrySnap.batteryPct, telemetrySnap.systemMode, telemetrySnap.calibDone);
+	                telemetrySnap.batteryPct, telemetrySnap.batteryRawAdc, telemetrySnap.systemMode,
+	                telemetrySnap.calibDone);
+	            // Envia nas duas UARTs: a colega consegue ver a telemetria (e o
+	            // BatRaw=, p/ diagnosticar a bateria) no terminal serial do VCP do
+	            // ST-Link, sem precisar do celular/HC-05.
 	            HAL_UART_Transmit(&huart3, (uint8_t*)txBuffer, strlen(txBuffer), 100);
+	            HAL_UART_Transmit(&hlpuart1, (uint8_t*)txBuffer, strlen(txBuffer), 100);
 	        }
 	    }
 
@@ -1011,9 +1214,9 @@ void vStartTaskLCD(void *argument)
 
 	    (void)argument;
 	    // Requisito funcional do LCD: exibir velocidade atual, distância percorrida,
-	    // coordenadas (x,y) e bateria (%), atualizando a 1 Hz. Lê a telemetria
+	    // coordenadas (x,y,theta) e bateria (%), atualizando a 1 Hz. Lê a telemetria
 	    // diretamente (sob mutex) -> sempre o valor MAIS RECENTE, sem fila atrasando.
-	    //   Linha 1:  X:<x> Y:<y>            (metros)
+	    //   Linha 1:  X<x>Y<y>T<theta>       (metros, metros, graus)
 	    //   Linha 2:  V<vel> D<dist> B<bat>% (m/s, metros, %)
 	    char l1[17], l2[17];
 	    TelemetryData_t t = {0};   // zera p/ não exibir lixo se um acquire falhar
@@ -1034,7 +1237,9 @@ void vStartTaskLCD(void *argument)
 
 	        // Monta as 2 linhas e completa com espaços até 16 col (lcdPrintStr manda
 	        // 16 bytes fixos; sem o padding sobraria lixo/null no fim da linha).
-	        n = snprintf(l1, sizeof(l1), "X:%+5.2f Y:%+5.2f", t.posX, t.posY);
+	        // Theta (rad) convertido p/ graus, mais legível no display 16x2.
+	        float fThetaDeg = t.theta * 57.29577951f;
+	        n = snprintf(l1, sizeof(l1), "X%+4.1fY%+4.1fT%+4.0f", t.posX, t.posY, fThetaDeg);
 	        for (int i = (n < 0 ? 0 : n); i < 16; i++) l1[i] = ' ';
 	        n = snprintf(l2, sizeof(l2), "V%4.2f D%4.1fB%u%%",
 	                     t.speedCurrent, t.distTotal, t.batteryPct);
@@ -1126,7 +1331,7 @@ void vStartTaskTrocarModo(void *argument)
 	            ucCurrentMode = ucNewMode;
 	            gvSystemMode = ucCurrentMode;   // <- vTaskSegueLinha passa a (não) rodar o PID
 
-	            // LED vermelho indica o modo: ACESO em MANUAL, apagado em AUTOMÁTICO.
+	            // LED vermelho indica o modo: ACESO em MANUAL, apagado em AUTOMATICO.
 	            LED_MANUAL_SET(ucCurrentMode == MODE_MANUAL);
 
 	            // SEGURANÇA: ao sair do modo AUTÔNOMO a vTaskSegueLinha deixa de enviar
@@ -1180,7 +1385,6 @@ void vStartTaskUltrassonicBuzzer(void *argument)
     // Abordagem escolhida: usa o driver distanceSensor.c (captura por DMA).
     const TickType_t xPeriod = pdMS_TO_TICKS(TASK_PERIOD_ULTRASONIC);
     TickType_t xLastWakeTime = xTaskGetTickCount();
-    MotorCommand_t xStopCmd = {0.0f, 0.0f, 0};   // ucCmdType 0 = STOP
     float fDistance;
 
     // Buzzer no TIM8_CH1: clock do timer = 170MHz/170 = 1 MHz (prescaler 170-1).
@@ -1191,13 +1395,30 @@ void vStartTaskUltrassonicBuzzer(void *argument)
     const float   fUltraAlertCm  = 20.0f;     // distância para começar a apitar
     const float   fUltraMaxCm    = 400.0f;    // máximo plausível
     const uint8_t ucUltraConfirm = 2U;        // amostras consecutivas para confirmar alerta
+    const float   fSpreadMaxCm   = 5.0f;      // leitura só vale se as 5 amostras
+                                              // variarem menos que isto (estável =
+                                              // objeto real; no ar pula muito)
 
-    // Filtro de média móvel com 20 amostras
-    #define       ULTRA_AVG_N   20U
-    float         fUltraBuf[ULTRA_AVG_N];
-    uint8_t       ucUltraIdx    = 0U;
-    uint8_t       ucUltraCnt    = 0U;         // quantas amostras já foram inseridas
-    uint8_t       ucNearCount   = 0U;         // contagem de amostras na zona de alerta
+    // ucNearCount: debounce — exige N amostras consecutivas na zona de alerta
+    // antes de apitar.
+    uint8_t       ucNearCount   = 0U;
+
+    // ---- FILTRO DE MÉDIA MÓVEL (DESATIVADO, mantido p/ referência) ----------
+    // Substituído pela MEDIANA (abaixo) + decisão por FAIXAS. Para voltar à
+    // média: descomente estas declarações e o bloco "3+4" dentro do laço.
+    // #define       ULTRA_AVG_N   20U
+    // float         fUltraBuf[ULTRA_AVG_N];
+    // uint8_t       ucUltraIdx    = 0U;
+    // uint8_t       ucUltraCnt    = 0U;
+
+    // ---- FILTRO DE MEDIANA (5 amostras) -> alimenta as FAIXAS -----------------
+    // A mediana rejeita PICOS espúrios (leituras erradas por gatilho rápido do
+    // HC-SR04 / estouro do timer do eco) que, na leitura crua, faziam o buzzer
+    // apitar sem parar ao ligar. Buffer inicia em 400 cm ("longe") -> silêncio
+    // no boot até ter amostras reais de obstáculo próximo.
+    #define       ULTRA_MED_N   5U
+    float         fMedBuf[ULTRA_MED_N] = {400.0f, 400.0f, 400.0f, 400.0f, 400.0f};
+    uint8_t       ucMedIdx     = 0U;
 
     for(;;)
     {
@@ -1211,49 +1432,78 @@ void vStartTaskUltrassonicBuzzer(void *argument)
             fRaw = fUltraMaxCm;
         }
 
-        // 3. Insere no buffer circular da média móvel
-        fUltraBuf[ucUltraIdx] = fRaw;
-        ucUltraIdx = (ucUltraIdx + 1U) % ULTRA_AVG_N;
-        if (ucUltraCnt < ULTRA_AVG_N) {
-            ucUltraCnt++;
-        }
+        // 3+4. MÉDIA MÓVEL (DESATIVADA — mantida comentada p/ referência).
+        // fUltraBuf[ucUltraIdx] = fRaw;
+        // ucUltraIdx = (ucUltraIdx + 1U) % ULTRA_AVG_N;
+        // if (ucUltraCnt < ULTRA_AVG_N) { ucUltraCnt++; }
+        // if (ucUltraCnt == ULTRA_AVG_N) {
+        //     float fSum = 0.0f;
+        //     for (uint8_t k = 0U; k < ULTRA_AVG_N; k++) fSum += fUltraBuf[k];
+        //     fDistance = fSum / (float)ULTRA_AVG_N;
+        // } else {
+        //     float fSum = 0.0f;
+        //     for (uint8_t k = 0U; k < ucUltraCnt; k++) fSum += fUltraBuf[k];
+        //     fDistance = fSum / (float)ucUltraCnt;
+        // }
 
-        // 4. Calcula a média (usa todas as amostras quando o buffer está cheio)
-        if (ucUltraCnt == ULTRA_AVG_N) {
-            float fSum = 0.0f;
-            for (uint8_t k = 0U; k < ULTRA_AVG_N; k++) {
-                fSum += fUltraBuf[k];
-            }
-            fDistance = fSum / (float)ULTRA_AVG_N;
-        } else {
-            // Ainda não encheu o buffer; média parcial
-            float fSum = 0.0f;
-            for (uint8_t k = 0U; k < ucUltraCnt; k++) {
-                fSum += fUltraBuf[k];
-            }
-            fDistance = fSum / (float)ucUltraCnt;
+        // 3+4 (ATIVO). MEDIANA de 5 amostras cruas -> rejeita picos espúrios.
+        fMedBuf[ucMedIdx] = fRaw;
+        ucMedIdx = (uint8_t)((ucMedIdx + 1U) % ULTRA_MED_N);
+        float fTmp[ULTRA_MED_N];
+        for (uint8_t k = 0U; k < ULTRA_MED_N; k++) fTmp[k] = fMedBuf[k];
+        for (uint8_t a = 1U; a < ULTRA_MED_N; a++) {   // insertion sort (N=5)
+            float v = fTmp[a];
+            int8_t b = (int8_t)a - 1;
+            while (b >= 0 && fTmp[b] > v) { fTmp[b + 1] = fTmp[b]; b--; }
+            fTmp[b + 1] = v;
         }
+        fDistance = fTmp[ULTRA_MED_N / 2];   // elemento do meio = mediana
 
-        // 5. Verifica se a distância média está na zona de alerta
-        if (fDistance >= fUltraMinCm && fDistance < fUltraAlertCm) {
+        // 4b. GATE DE CONFIABILIDADE: as 5 amostras só valem se estiverem
+        //     consistentes (spread pequeno). fTmp está ORDENADO -> [0]=mín,
+        //     [N-1]=máx. No ar, as leituras espúrias pulam (mistura de 400
+        //     "longe" com picos curtos) -> spread enorme -> descartado (silêncio).
+        //     Com objeto real, ficam estáveis -> spread pequeno -> apita.
+        float   fSpread   = fTmp[ULTRA_MED_N - 1] - fTmp[0];
+        uint8_t ucReliable = (fSpread < fSpreadMaxCm) ? 1U : 0U;
+
+        // 5. Conta amostras na zona de alerta SOMENTE se a leitura for confiável.
+        if (ucReliable && fDistance >= fUltraMinCm && fDistance < fUltraAlertCm) {
             if (ucNearCount < ucUltraConfirm) ucNearCount++;
         } else {
-            ucNearCount = 0U;   // zera imediatamente ao sair da zona
+            ucNearCount = 0U;   // fora da zona OU leitura instável -> não apita
         }
 
-        // 6. Decisão do buzzer e parada de emergência
+        // 6. Decisão do buzzer por FAIXAS de distância (thresholds): cada faixa
+        //    toca um tom FIXO distinto -> dá pra "ouvir" a aproximação em degraus.
+        //    Mais perto = mais agudo. (A versão proporcional contínua ficou
+        //    comentada logo abaixo, caso queiram voltar.)
         uint16_t usFreq = 0;   // 0 = buzzer desligado
         if (ucNearCount >= ucUltraConfirm) {
-            if (fDistance < STOP_DISTANCE_CM) {
-                // Obstáculo muito próximo: parada imediata + tom máximo
-                osMessageQueuePut(qMotorCommandHandle, &xStopCmd, 1U, 0);
-                usFreq = 2000;
-            } else {
-                // Frequência proporcional à distância (20cm->500Hz, 5cm->2000Hz)
-                usFreq = (uint16_t)(500.0f + (fUltraAlertCm - fDistance) *
-                                    (1500.0f / (fUltraAlertCm - STOP_DISTANCE_CM)));
-                if (usFreq > 2000) usFreq = 2000;
+            if (fDistance <= STOP_DISTANCE_CM) {          // <= STOP_DISTANCE_CM (7 cm): muito perto
+            	// Emergência SÓ aqui: fDistance é a MEDIANA de 5 amostras e este
+            	// ramo só roda com ucReliable (spread < 5 cm) + 2 confirmações ->
+            	// leitura flutuante do eco NÃO dispara mais a event flag.
+            	HAL_GPIO_WritePin(LD2_GPIO_Port, LD2_Pin, 1);
+            	osEventFlagsSet(evEmergencyHandle, EMERGENCY_BIT);
+                usFreq = 2000;                            // tom mais agudo
+            } else if (fDistance < 10.0f) {              // 5 a 10 cm
+                usFreq = 1500;
+            } else if (fDistance < 15.0f) {              // 10 a 15 cm
+                usFreq = 1000;
+            } else {                                      // 15 a 20 cm
+                usFreq = 600;                             // tom mais grave
             }
+
+            // --- Versão PROPORCIONAL contínua (DESATIVADA) ---
+            // if (fDistance < STOP_DISTANCE_CM) {
+            //     osMessageQueuePut(qMotorCommandHandle, &xStopCmd, 1U, 0);
+            //     usFreq = 2000;
+            // } else {
+            //     usFreq = (uint16_t)(500.0f + (fUltraAlertCm - fDistance) *
+            //                         (1500.0f / (fUltraAlertCm - STOP_DISTANCE_CM)));
+            //     if (usFreq > 2000) usFreq = 2000;
+            // }
         }
 
         // 7. Aplica a frequência no buzzer (TIM8_CH1)
@@ -1268,7 +1518,6 @@ void vStartTaskUltrassonicBuzzer(void *argument)
 #endif /* ULTRASONIC_BUZZER_ENABLED */
   /* USER CODE END vStartTaskUltrassonicBuzzer */
 }
-
 
 /* Private application code --------------------------------------------------*/
 /* USER CODE BEGIN Application */
