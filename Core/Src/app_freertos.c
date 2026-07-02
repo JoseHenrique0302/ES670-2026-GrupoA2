@@ -409,9 +409,9 @@ void MX_FREERTOS_Init(void) {
     // Ajustáveis em tempo de execução via "SET_PID kp ki kd" (UART/app) -> dá
     // pra afinar na pista SEM reflashar. Valor achado na pista: 0.9 / 0 / 0.5.
     // >>> É AQUI que você muda o PADRÃO do seguidor de linha (só reflashar). <<<
-    gvPIDParams.fKp = 0.93f;
+    gvPIDParams.fKp = 5.00f;
     gvPIDParams.fKi = 0.0f;
-    gvPIDParams.fKd = 0.55f;
+    gvPIDParams.fKd = 2.17f;
 
     // Limiar de binarização padrão (meio da escala de 12 bits). Fallback caso o
     // usuário rode o seguir-linha SEM calibrar. O ideal é sempre calibrar antes
@@ -1015,7 +1015,7 @@ void vStartTaskSegueLinha(void *argument)
 	        gvLineError = fError;
 
 	        // Ganhos PID atuais (ajustáveis por Bluetooth via mutexPIDParams)
-	        float fKp = 0.93f, fKi = 0.0f, fKd = 0.55f; // fallback = defaults do init
+	        float fKp = 5.00f, fKi = 0.0f, fKd = 2.17f; // fallback = defaults do init
 	        if (osMutexAcquire(mutexPIDParamsHandle, pdMS_TO_TICKS(5)) == osOK)
 	        {
 	            fKp = gvPIDParams.fKp;
@@ -1153,7 +1153,7 @@ void vStartTaskUART(void *argument)
     static uint8_t rxIndex = 0;
     TelemetryData_t telemetrySnap;
     char txBuffer[256];
-    const TickType_t xTelemetryPeriod = pdMS_TO_TICKS(1000);
+    const TickType_t xTelemetryPeriod = pdMS_TO_TICKS(800);
     TickType_t xLastTelemetryTime = xTaskGetTickCount();
 
     // Função interna para processar um byte recebido e montar comandos
