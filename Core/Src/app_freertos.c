@@ -159,7 +159,7 @@ typedef struct {
 // fraca -> o robô curva p/ a esquerda. Reforça a esquerda (>1.0). 1.0 = sem
 // trim. AJUSTAR na bancada: MANUAL "MOTOR 0.4 0.4" e subir/baixar até andar
 // reto (se ainda curvar p/ esquerda, aumenta; se curvar p/ direita, diminui).
-#define MOTOR_TRIM_LEFT    1.3f
+#define MOTOR_TRIM_LEFT    1.00f
 #define MOTOR_TRIM_RIGHT   1.00f
 
 // PID de velocidade do MOTOR (malha fechada com encoders). 0 = malha aberta
@@ -409,7 +409,7 @@ void MX_FREERTOS_Init(void) {
     // Ajustáveis em tempo de execução via "SET_PID kp ki kd" (UART/app) -> dá
     // pra afinar na pista SEM reflashar. Valor achado na pista: 0.9 / 0 / 0.5.
     // >>> É AQUI que você muda o PADRÃO do seguidor de linha (só reflashar). <<<
-    gvPIDParams.fKp = 0.85f;
+    gvPIDParams.fKp = 0.93f;
     gvPIDParams.fKi = 0.0f;
     gvPIDParams.fKd = 0.55f;
 
@@ -770,7 +770,7 @@ void vStartTaskSegueLinha(void *argument)
 	    (void)argument;
 	    MotorCommand_t xCmd;
 	    uint8_t  ucIRBin[5];
-	    const int8_t cWeights[5] = {-0.5, -1.1, 0, 1.1, 0.5};
+	    const int8_t cWeights[5] = {-0.5, -1.0, 0, 1.0, 0.5};
 
 	    // Parâmetros do controle de seguimento (ajustáveis)
 	    const float fBaseSpeed   = 0.35f;   // duty base (0..1) das rodas
@@ -967,7 +967,7 @@ void vStartTaskSegueLinha(void *argument)
 	            }
 	            else
 	            {
-	                if ((xTaskGetTickCount() - ulWhiteStartTick) >= pdMS_TO_TICKS(500))
+	                if ((xTaskGetTickCount() - ulWhiteStartTick) >= pdMS_TO_TICKS(1000))
 	                {
 	                    // Para os motores
 	                    MotorCommand_t xStopCmd = {0.0f, 0.0f, 0};
@@ -1015,7 +1015,7 @@ void vStartTaskSegueLinha(void *argument)
 	        gvLineError = fError;
 
 	        // Ganhos PID atuais (ajustáveis por Bluetooth via mutexPIDParams)
-	        float fKp = 0.85f, fKi = 0.0f, fKd = 0.55f; // fallback = defaults do init
+	        float fKp = 0.93f, fKi = 0.0f, fKd = 0.55f; // fallback = defaults do init
 	        if (osMutexAcquire(mutexPIDParamsHandle, pdMS_TO_TICKS(5)) == osOK)
 	        {
 	            fKp = gvPIDParams.fKp;
